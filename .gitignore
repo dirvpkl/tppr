@@ -1,5 +1,9 @@
 .env
 mihomo/providers/mine.yaml
 mihomo/providers/free.yaml
+# mihomo runtime data (downloaded/geodata caches, never committed)
+mihomo/*.dat
+mihomo/*.metadb
+mihomo/*.db
 __pycache__/
 *.pyc
