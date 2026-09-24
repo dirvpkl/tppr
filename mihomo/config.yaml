@@ -1,0 +1,76 @@
+# Single local endpoint (HTTP/SOCKS) backed by a pool of upstream proxies.
+# No TUN. Heartbeats every 10s (latency), throughput sweeps by speed-tester.
+# Container ports 7890/9090 must match docker-compose.yml and the tester env.
+# allow-lan + empty secret are safe ONLY inside compose (host binds 127.0.0.1);
+# never run this config with a bare local mihomo exposed to a network.
+mixed-port: 7890
+# Container must listen on all interfaces (compose maps host 127.0.0.1 only,
+# so nothing is exposed to LAN despite allow-lan below).
+allow-lan: true
+bind-address: "*"
+mode: rule
+log-level: info
+external-controller: 0.0.0.0:9090
+secret: ""
+
+dns:
+  enable: true
+  nameserver:
+    - 8.8.8.8
+    - 1.1.1.1
+
+proxy-providers:
+  free-vless:
+    type: http
+    url: "https://github.com/Au1rxx/free-vpn-subscriptions/raw/main/output/clash.yaml"
+    path: ./providers/free.yaml
+    interval: 21600
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 60
+      timeout: 5000
+      lazy: false
+      expected-status: 204
+  # Private upstreams: copy providers/mine.yaml.example to providers/mine.yaml,
+  # then uncomment the block below. (An empty file provider is rejected, so it
+  # stays out of the default config.)
+  # mine:
+  #   type: file
+  #   path: ./providers/mine.yaml
+  #   health-check:
+  #     enable: true
+  #     url: https://www.gstatic.com/generate_204
+  #     interval: 60
+  #     timeout: 5000
+  #     lazy: false
+  #     expected-status: 204
+
+proxy-groups:
+  - name: POOL
+    type: url-test
+    use: [free-vless]
+    # Shrink giant free pools by region, e.g.:
+    # filter: "(?i)germany|netherlands|finland"
+    url: https://www.gstatic.com/generate_204
+    interval: 10
+    timeout: 5000
+    tolerance: 50
+    lazy: false
+    interrupt_exist_connections: false
+    expected-status: 204
+  - name: PROXY
+    type: select
+    proxies: [POOL, DIRECT]
+
+rules:
+  - GEOSITE,telegram,POOL
+  - GEOIP,telegram,POOL
+  - IP-CIDR,91.108.4.0/22,POOL
+  - IP-CIDR,91.108.8.0/22,POOL
+  - IP-CIDR,149.154.160.0/20,POOL
+  - GEOSITE,youtube,POOL
+  - DOMAIN-SUFFIX,googlevideo.com,POOL
+  - DOMAIN-SUFFIX,youtube.com,POOL
+  - DOMAIN-SUFFIX,youtu.be,POOL
+  - MATCH,DIRECT

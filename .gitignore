@@ -1,0 +1,5 @@
+.env
+mihomo/providers/mine.yaml
+mihomo/providers/free.yaml
+__pycache__/
+*.pyc

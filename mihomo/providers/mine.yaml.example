@@ -1,0 +1,20 @@
+# Copy to mine.yaml and put your own upstreams here. mine.yaml is gitignored.
+# This file stays a template with no real credentials.
+proxies: []
+  # Add your own upstreams below, e.g.
+  # - name: "my-socks"
+  #   type: socks5
+  #   server: 203.0.113.10
+  #   port: 1080
+  #   username: "user"
+  #   password: "pass"
+  #   udp: true
+  # - name: "my-vless"
+  #   type: vless
+  #   server: example.com
+  #   port: 443
+  #   uuid: "00000000-0000-0000-0000-000000000000"
+  #   tls: true
+  #   servername: example.com
+  #   flow: xtls-rprx-vision
+  #   udp: true

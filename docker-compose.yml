@@ -1,0 +1,33 @@
+name: proxy-pool
+
+# One local endpoint (HTTP/SOCKS) backed by a pool of upstream proxies.
+# Published host ports are approved for local use (127.0.0.1 only).
+# To expose more ports later: add one mapping line + one var in .env.example.
+
+services:
+  proxy-pool-mihomo-relay:
+    image: metacubex/mihomo:${MIHOMO_TAG:?mihomo image tag is required, e.g. MIHOMO_TAG=latest}
+    container_name: proxy-pool-mihomo-relay
+    restart: unless-stopped
+    volumes:
+      - ./mihomo:/etc/mihomo
+    ports:
+      - "127.0.0.1:${HOST_MIXED_PORT:?host mixed proxy port is required, e.g. HOST_MIXED_PORT=7890}:7890"
+      - "127.0.0.1:${HOST_CONTROLLER_PORT:?host controller port is required, e.g. HOST_CONTROLLER_PORT=9090}:9090"
+    command: ["-d", "/etc/mihomo"]
+
+  proxy-pool-speed-tester:
+    build: ./speed-tester
+    container_name: proxy-pool-speed-tester
+    restart: unless-stopped
+    depends_on:
+      - proxy-pool-mihomo-relay
+    environment:
+      MIHOMO_API: http://proxy-pool-mihomo-relay:9090
+      PROXY_URL: http://proxy-pool-mihomo-relay:7890
+      TEST_GROUP: ${TEST_GROUP:?proxy group to rotate is required, e.g. TEST_GROUP=POOL}
+      TEST_URL: ${TEST_URL:?download URL for speed probes is required}
+      TEST_INTERVAL_S: ${TEST_INTERVAL_S:?sweep interval in seconds is required, e.g. TEST_INTERVAL_S=300}
+      TEST_TIMEOUT_S: ${TEST_TIMEOUT_S:?per-node probe timeout in seconds is required, e.g. TEST_TIMEOUT_S=15}
+      TEST_MAX_BYTES: ${TEST_MAX_BYTES:?download cap per probe in bytes is required, e.g. TEST_MAX_BYTES=8388608}
+      TEST_MAX_NODES: ${TEST_MAX_NODES:?throughput probes per sweep are required, e.g. TEST_MAX_NODES=25}
