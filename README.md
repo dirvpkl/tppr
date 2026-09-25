@@ -10,8 +10,11 @@
 - Slow loop (`proxy-pool-speed-tester`, default every 300s): takes the 25
   lowest-latency members, downloads a test file through each, measures real
   throughput (Mbps, not ping), and pins the group to the fastest healthy node
-  via the Clash API. Giant free pools: shrink with the `filter` regex in
-  `config.yaml`.
+  via the Clash API. Results persist in SQLite (`tester-data` volume): nodes
+  failing 3 sweeps in a row are skipped but retried once failures age past
+  `HISTORY_COOLDOWN_H`, old rows are pruned, and on boot the group is restored
+  to the recent best (cooled nodes excluded). Giant free pools: shrink with
+  the `filter` regex in `config.yaml`.
 - Routing: Telegram and YouTube go through `POOL`, everything else is `DIRECT`.
 
 ## Quickstart
@@ -50,4 +53,5 @@ git push -u origin main
 - `mihomo/config.yaml` — pool, 10s heartbeat group, TG/YT rules.
 - `mihomo/providers/mine.yaml.example` — template for private upstreams.
 - `speed-tester/tester.py` — throughput sweeps (stdlib only, structured logs).
+- `speed-tester/history.py` — SQLite sweep history (cooldown + boot restore).
 - `scripts/smoke.ps1` — config + syntax sanity checks.

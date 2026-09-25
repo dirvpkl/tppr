@@ -6,6 +6,8 @@ Each sweep takes the TEST_MAX_NODES lowest-latency members (from provider
 healthcheck history), downloads TEST_URL through each of them via the local
 mixed proxy, measures real bytes/sec, and selects the fastest healthy node
 through the Clash API. If no member is measurable the selection is left untouched.
+Sweep results persist in SQLite history: nodes with consecutive recent failures
+are skipped (cooldown), and on boot the group is restored to the recent best.
 """
 
 import json
@@ -17,6 +19,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+
+from history import History
 
 # Top-level imports only; stdlib modules have negligible import cost.
 
@@ -37,6 +41,10 @@ class TesterConfig:
         self.timeout_s = _required_int("TEST_TIMEOUT_S", minimum=5)
         self.max_bytes = _required_int("TEST_MAX_BYTES", minimum=262144)
         self.max_nodes = _required_int("TEST_MAX_NODES", minimum=3)
+        self.history_db = _required_str("HISTORY_DB")
+        self.cooldown_fails = _required_int("HISTORY_COOLDOWN_FAILS", minimum=1)
+        self.cooldown_h = _required_int("HISTORY_COOLDOWN_H", minimum=1)
+        self.history_window_h = _required_int("HISTORY_WINDOW_H", minimum=1)
 
 
 def _required_str(name: str) -> str:
@@ -146,7 +154,7 @@ def pin_and_measure(config: TesterConfig, node: str) -> float:
     return received / 1024.0 / elapsed
 
 
-def sweep(config: TesterConfig) -> None:
+def sweep(config: TesterConfig, history: History) -> None:
     run_id = uuid.uuid4().hex[:8]
     members, current = group_state(config)
     candidates = [n for n in members if n not in SKIP_NODES]
@@ -155,26 +163,90 @@ def sweep(config: TesterConfig) -> None:
         return
     delays = provider_delays(config)
     ranked = sorted(candidates, key=lambda n: (delays.get(n) is None, delays.get(n) or 0))
-    shortlist = ranked[: config.max_nodes]
+    shortlist: list[str] = []
+    cooled = 0
+    for node in ranked:
+        if (
+            history.consecutive_failures(node, config.cooldown_fails, config.cooldown_h)
+            >= config.cooldown_fails
+        ):
+            cooled += 1
+            continue
+        shortlist.append(node)
+        if len(shortlist) >= config.max_nodes:
+            break
+    if not shortlist:
+        LOG.error(
+            f"run={run_id} event=sweep_skipped reason=all_in_cooldown "
+            f"pool={len(candidates)} selection_kept={current}"
+        )
+        return
     LOG.info(
         f"run={run_id} event=sweep_started group={config.group} "
-        f"pool={len(candidates)} tested={len(shortlist)} current={current}"
+        f"pool={len(candidates)} tested={len(shortlist)} skipped_cooldown={cooled} current={current}"
     )
     speeds: dict[str, float] = {}
-    for node in shortlist:
-        speeds[node] = pin_and_measure(config, node)
+    try:
+        for node in shortlist:
+            speeds[node] = pin_and_measure(config, node)
+        history.record_sweep(run_id, speeds)
+        history.prune(max(config.history_window_h, config.cooldown_h))
+    except RuntimeError as exc:
+        LOG.error(f"run={run_id} event=sweep_aborted error={exc} selection_restored={current}")
+        try:
+            select_node(config, current)
+        except RuntimeError as restore_exc:
+            LOG.critical(f"run={run_id} event=restore_failed error={restore_exc}")
+        return
     healthy = {node: speed for node, speed in speeds.items() if speed > 0}
     if not healthy:
         LOG.error(f"run={run_id} event=sweep_failed reason=all_nodes_unmeasurable selection_kept={current}")
-        select_node(config, current)
+        try:
+            select_node(config, current)
+        except RuntimeError as exc:
+            LOG.critical(f"run={run_id} event=restore_failed error={exc}")
         return
     fastest = max(healthy, key=lambda node: healthy[node])
     summary = ",".join(f"{node}={speed:.0f}KB/s" for node, speed in sorted(healthy.items()))
     if fastest == current:
         LOG.info(f"run={run_id} event=kept node={current} speeds=[{summary}]")
-    else:
+        return
+    try:
         select_node(config, fastest)
+    except RuntimeError as exc:
+        LOG.critical(f"run={run_id} event=rotate_failed to={fastest} error={exc}")
+    else:
         LOG.info(f"run={run_id} event=rotated from={current} to={fastest} speeds=[{summary}]")
+
+
+def restore_best(config: TesterConfig, history: History) -> None:
+    """Pin the group to the recent fastest node, if history knows one."""
+    try:
+        members, current = group_state(config)
+        pool = [n for n in members if n not in SKIP_NODES]
+        eligible = [
+            n
+            for n in pool
+            if history.consecutive_failures(n, config.cooldown_fails, config.cooldown_h)
+            < config.cooldown_fails
+        ]
+        if len(eligible) < len(pool):
+            LOG.info(f"event=restore_cooled skipped={len(pool) - len(eligible)}")
+        best = history.best_node(eligible, config.history_window_h)
+    except RuntimeError as exc:
+        LOG.error(f"event=restore_skipped error={exc}")
+        return
+    if best is None:
+        LOG.info("event=no_history starting_cold=true")
+    elif best == current:
+        LOG.info(f"event=restored node={best} already_selected=true")
+    else:
+        try:
+            select_node(config, best)
+        except RuntimeError as exc:
+            LOG.error(f"event=restore_failed error={exc}")
+        else:
+            LOG.info(f"event=restored node={best} previous={current}")
 
 
 def main() -> int:
@@ -183,13 +255,21 @@ def main() -> int:
     except ValueError as exc:
         LOG.critical(f"event=bad_config error={exc}")
         return 1
+    try:
+        history = History(config.history_db)
+    except RuntimeError as exc:
+        LOG.critical(f"event=bad_history error={exc}")
+        return 1
     LOG.info(
         f"event=started group={config.group} interval_s={config.interval_s} "
-        f"timeout_s={config.timeout_s} max_bytes={config.max_bytes} max_nodes={config.max_nodes}"
+        f"timeout_s={config.timeout_s} max_bytes={config.max_bytes} max_nodes={config.max_nodes} "
+        f"history_db={config.history_db} cooldown_fails={config.cooldown_fails} "
+        f"cooldown_h={config.cooldown_h} history_window_h={config.history_window_h}"
     )
+    restore_best(config, history)
     while True:
         try:
-            sweep(config)
+            sweep(config, history)
         except RuntimeError as exc:
             LOG.error(f"event=sweep_error error={exc}")
         time.sleep(config.interval_s)

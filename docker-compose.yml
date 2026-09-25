@@ -31,3 +31,12 @@ services:
       TEST_TIMEOUT_S: ${TEST_TIMEOUT_S:?per-node probe timeout in seconds is required, e.g. TEST_TIMEOUT_S=15}
       TEST_MAX_BYTES: ${TEST_MAX_BYTES:?download cap per probe in bytes is required, e.g. TEST_MAX_BYTES=8388608}
       TEST_MAX_NODES: ${TEST_MAX_NODES:?throughput probes per sweep are required, e.g. TEST_MAX_NODES=25}
+      HISTORY_DB: /app/data/history.db
+      HISTORY_COOLDOWN_FAILS: ${HISTORY_COOLDOWN_FAILS:?consecutive failures before cooldown is required, e.g. HISTORY_COOLDOWN_FAILS=3}
+      HISTORY_COOLDOWN_H: ${HISTORY_COOLDOWN_H:?cooldown decay window in hours is required, e.g. HISTORY_COOLDOWN_H=1}
+      HISTORY_WINDOW_H: ${HISTORY_WINDOW_H:?history window in hours is required, e.g. HISTORY_WINDOW_H=24}
+    volumes:
+      - tester-data:/app/data
+
+volumes:
+  tester-data:
