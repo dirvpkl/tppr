@@ -1,4 +1,5 @@
 .env
+.workplanx/
 mihomo/providers/mine.yaml
 mihomo/providers/free.yaml
 # mihomo runtime data (downloaded/geodata caches, never committed)
@@ -7,3 +8,6 @@ mihomo/*.metadb
 mihomo/*.db
 __pycache__/
 *.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/

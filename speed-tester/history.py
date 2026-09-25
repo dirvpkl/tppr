@@ -1,9 +1,8 @@
 """SQLite history of throughput sweeps (stdlib sqlite3 only).
 
-Single responsibility: persist per-node probe results and answer two questions —
-which nodes sit in cooldown after consecutive recent failures, and which known
-node was fastest in the recent window. Every failure raises loudly; the caller
-decides what to do about it.
+Single responsibility: persist per-node probe results and answer whether a
+node sits in cooldown after consecutive recent failures. Every failure raises
+loudly; the caller decides what to do about it.
 """
 
 import sqlite3
@@ -59,7 +58,7 @@ class History:
         except sqlite3.Error as exc:
             raise RuntimeError(f"cannot record sweep: {exc}") from exc
 
-    def consecutive_failures(self, node: str, limit: int, window_h: int) -> int:
+    def consecutive_failures(self, node: str, limit: int, window_seconds: float) -> int:
         """Trailing failures, or 0 when the latest probe is older than the window.
 
         The staleness check is what heals cooldown: a skipped node gets no new
@@ -73,7 +72,7 @@ class History:
             ).fetchall()
         except sqlite3.Error as exc:
             raise RuntimeError(f"cannot read history: {exc}") from exc
-        if not rows or rows[0][1] < int(time.time()) - window_h * 3600:
+        if not rows or rows[0][1] < time.time() - window_seconds:
             return 0
         fails = 0
         for ok, _ in rows:
@@ -82,38 +81,13 @@ class History:
             fails += 1
         return fails
 
-    def best_node(self, nodes: list[str], window_h: int) -> str | None:
-        """Node with the highest median throughput in the window, or None."""
-        if not nodes:
-            return None
-        cutoff = int(time.time()) - window_h * 3600
-        placeholders = ",".join("?" for _ in nodes)
-        try:
-            rows = self._db.execute(
-                "SELECT node, kbps FROM measurements"
-                f" WHERE node IN ({placeholders}) AND ok = 1 AND measured_at >= ?",
-                (*nodes, cutoff),
-            ).fetchall()
-        except sqlite3.Error as exc:
-            raise RuntimeError(f"cannot read history: {exc}") from exc
-        by_node: dict[str, list[float]] = {}
-        for node, kbps in rows:
-            by_node.setdefault(node, []).append(kbps)
-        best: str | None = None
-        best_median = -1.0
-        for node, speeds in by_node.items():
-            ordered = sorted(speeds)
-            median = ordered[len(ordered) // 2]
-            if median > best_median:
-                best_median = median
-                best = node
-        return best
-
     def prune(self, retention_h: int) -> None:
         """Delete measurements older than the retention window (plus orphans)."""
         cutoff = int(time.time()) - retention_h * 3600
         try:
-            self._db.execute("DELETE FROM measurements WHERE measured_at < ?", (cutoff,))
+            self._db.execute(
+                "DELETE FROM measurements WHERE measured_at < ?", (cutoff,)
+            )
             self._db.execute(
                 "DELETE FROM sweeps WHERE id NOT IN (SELECT DISTINCT sweep_id FROM measurements)"
             )

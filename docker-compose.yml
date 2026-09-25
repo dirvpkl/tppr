@@ -24,13 +24,24 @@ services:
       - proxy-pool-mihomo-relay
     environment:
       MIHOMO_API: http://proxy-pool-mihomo-relay:9090
-      PROXY_URL: http://proxy-pool-mihomo-relay:7890
-      TEST_GROUP: ${TEST_GROUP:?proxy group to rotate is required, e.g. TEST_GROUP=POOL}
+      PROXY_URL: http://proxy-pool-mihomo-relay:7891
+      TEST_GROUP: ${TEST_GROUP:?proxy group used only for speed probes is required, e.g. TEST_GROUP=TEST_POOL}
+      PRODUCTION_GROUP: ${PRODUCTION_GROUP:?production proxy group is required, e.g. PRODUCTION_GROUP=POOL}
+      PROVIDER_NAMES: ${PROVIDER_NAMES:?comma-separated provider names is required, e.g. PROVIDER_NAMES=free-vless}
+      HEALTH_URL: ${HEALTH_URL:?HTTP health-check URL is required}
+      HEALTH_INTERVAL_S: ${HEALTH_INTERVAL_S:?current-node health interval in seconds is required, e.g. HEALTH_INTERVAL_S=10}
+      HEALTH_TIMEOUT_MS: ${HEALTH_TIMEOUT_MS:?health probe timeout in milliseconds is required, e.g. HEALTH_TIMEOUT_MS=3000}
+      MAX_DELAY_MS: ${MAX_DELAY_MS:?maximum acceptable candidate latency is required, e.g. MAX_DELAY_MS=800}
+      PROBE_BATCH_SIZE: ${PROBE_BATCH_SIZE:?nodes probed per batch is required, e.g. PROBE_BATCH_SIZE=100}
+      PROBE_WORKERS: ${PROBE_WORKERS:?parallel probe workers is required, e.g. PROBE_WORKERS=100}
+      MAX_PROBE_BATCHES: ${MAX_PROBE_BATCHES:?maximum candidate batches per scan is required, e.g. MAX_PROBE_BATCHES=3}
+      FAILOVER_GOOD_CANDIDATES: ${FAILOVER_GOOD_CANDIDATES:?good candidates required for failover is required, e.g. FAILOVER_GOOD_CANDIDATES=1}
+      SWEEP_GOOD_CANDIDATES: ${SWEEP_GOOD_CANDIDATES:?good candidates required for a sweep is required, e.g. SWEEP_GOOD_CANDIDATES=5}
       TEST_URL: ${TEST_URL:?download URL for speed probes is required}
       TEST_INTERVAL_S: ${TEST_INTERVAL_S:?sweep interval in seconds is required, e.g. TEST_INTERVAL_S=300}
       TEST_TIMEOUT_S: ${TEST_TIMEOUT_S:?per-node probe timeout in seconds is required, e.g. TEST_TIMEOUT_S=15}
       TEST_MAX_BYTES: ${TEST_MAX_BYTES:?download cap per probe in bytes is required, e.g. TEST_MAX_BYTES=8388608}
-      TEST_MAX_NODES: ${TEST_MAX_NODES:?throughput probes per sweep are required, e.g. TEST_MAX_NODES=25}
+      TEST_MAX_NODES: ${TEST_MAX_NODES:?throughput probes per sweep is required, e.g. TEST_MAX_NODES=5}
       HISTORY_DB: /app/data/history.db
       HISTORY_COOLDOWN_FAILS: ${HISTORY_COOLDOWN_FAILS:?consecutive failures before cooldown is required, e.g. HISTORY_COOLDOWN_FAILS=3}
       HISTORY_COOLDOWN_H: ${HISTORY_COOLDOWN_H:?cooldown decay window in hours is required, e.g. HISTORY_COOLDOWN_H=1}

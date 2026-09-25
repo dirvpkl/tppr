@@ -6,6 +6,8 @@ docker compose config --quiet
 if ($LASTEXITCODE -ne 0) { throw "docker compose config failed" }
 python -m py_compile speed-tester/tester.py speed-tester/history.py
 if ($LASTEXITCODE -ne 0) { throw "speed-tester does not compile" }
+python -m unittest discover -s speed-tester/tests -v
+if ($LASTEXITCODE -ne 0) { throw "speed-tester tests failed" }
 try {
   python -c "import yaml" 2>$null
   if ($LASTEXITCODE -eq 0) {
