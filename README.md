@@ -1,12 +1,10 @@
-# proxy-pool 0.2.0 — one local HTTP/SOCKS endpoint backed by a pool of upstreams.
+# proxy-pool 0.9.0 — a global pool, fixed Windows ports, an optional dispatcher, pinned accounts, and local pool aggregation.
 
 ## What it does
-- `proxy-pool-mihomo-relay` exposes HTTP/SOCKS on `127.0.0.1:7890`. The
+- `proxy-pool-mihomo-relay` exposes HTTP/SOCKS on `127.0.0.1:7890` inside Docker, published to the host as `HOST_MIXED_PORT` (17890 in the checked-in example). The
   `POOL` selector is the production route; the separate `TEST_POOL` selector
   is used only by the speed tester, so benchmarks never reroute live Telegram
-  or YouTube connections. Own upstreams: copy the provider example and
-  uncomment its block in `config.yaml`, add `mine` to both `use` lists, and
-  set `PROVIDER_NAMES=free-vless,mine`.
+  or YouTube connections.
 - Health loop: only the current production node is checked every 10s. On
   failure, candidates are latency-probed in batches of 100 with 100 workers;
   failover stops after 1 good candidate; a scheduled sweep collects up to 5
@@ -21,23 +19,98 @@
   dead selections go through speed-tested failover. No background health checks
   run across the full provider.
 - Routing: Telegram and YouTube go through `POOL`, everything else is `DIRECT`.
+- Custom upstream proxies live in `mihomo/providers/mine.yaml` and are inlined
+  into the generated config; the generator is the only writer of the active
+  config, so `scripts/reload.ps1` is the only supported way to apply changes.
+
+## Services and fixed ports
+- Each `[[services]]` block in the gitignored `services.toml` gets a group and,
+  unless the service is reachable through the dispatcher, a fixed
+  `127.0.0.1` port. Ports are declared in that file, not in `.env`, and are
+  generated into `docker-compose.override.yml`.
+- A service selects upstream nodes in one of two ways:
+  - `subscriptions = ["name", ...]` — every node of those providers;
+  - `primary = "proxy-name"` — one exact proxy, optionally followed by
+    `fallback = ["other-proxy"]` and the providers in `subscriptions`.
+- Service groups are Mihomo `fallback` groups, so a dead node is skipped for
+  the next one. `empty-fallback: REJECT` means an empty provider rejects the
+  connection instead of leaking traffic direct.
+
+## Subscriptions
+- Add one `[[subscriptions]]` block per remote feed; Mihomo pulls it natively
+  as a `proxy-provider`, so Clash/Mihomo YAML, URI lists, and base64
+  subscriptions all work without a converter:
+  ```toml
+  [[subscriptions]]
+  name = "my-vless"
+  url = "https://example.com/subscription"
+  interval = 21600
+  ```
+- Subscription URLs can contain tokens; keep `services.toml` local and do not commit it.
+
+## Local pool aggregation
+- Copy `pool-sources.example.toml` to `pool-sources.toml` and assign the ten sources to named pools. The file is gitignored because source URLs may contain tokens.
+- The `pool-aggregation` Compose profile starts SubConv and an internal pool worker. No worker or SubConv port is published to Windows.
+- The worker calls SubConv's `/provider` endpoint, accepts Clash/URI/base64 output, removes cross-source duplicates by canonical node fingerprint, and writes deterministic pool files such as `mihomo/providers/pool-free-pool.yaml`.
+- Sources are fetched in parallel (`worker.max_workers`). A dead source is reported as `degraded` in `/healthz` and skipped instead of taking the other pools down; the last good pool snapshot is kept when every source fails.
+- The worker also drops nodes Mihomo cannot parse. Mihomo empties an entire `proxy-provider` when a single node fails to initialize, so one free node with an unsupported shadowsocks cipher or a malformed key would otherwise take the whole pool down. The count is reported as `dropped_nodes` in `/healthz`.
+- `max_nodes` caps a pool at 1000 nodes; raise `MAX_NODES` in `pool-worker/worker.py` to go higher.
+- Reference pool names from `services.toml` with `subscriptions = ["free-pool"]`. A source may appear in several pools; a node is assigned to one pool by stable hash unless the pool is marked `shared = true`.
+- Pools use Mihomo fallback failover. Per-pool throughput rotation is not enabled; the existing speed tester manages only the global `POOL`.
+- `reload.ps1` enables the profile automatically when `pool-sources.toml` exists.
+
+## Dispatcher
+- Add one optional authenticated entry point; fixed per-service ports keep working unchanged:
+  ```toml
+  [dispatcher]
+  port = 20000
+  ```
+- Add `username` and `password` to any service that should be reachable through it. A service with credentials no longer needs its own `port`, so hundreds of accounts can share the single dispatcher port:
+  ```toml
+  [[services]]
+  name = "acc01"
+  primary = "my-proxy-01"
+  subscriptions = ["my-vless"]
+  username = "acc01"
+  password = "change-me-at-least-8"
+  ```
+- Mihomo authenticates the user and routes the connection with `IN-USER` to `SVC_acc01`. Use `http://acc01:change-me-at-least-8@127.0.0.1:20000` or `socks5://acc01:change-me-at-least-8@127.0.0.1:20000` in clients that support proxy authentication.
+- Services without credentials remain available only on their fixed port. Passwords stay in the gitignored `services.toml`.
+- `MAX_SERVICES` is 1000. Exceeding it names the constant and the file to edit.
+- `scripts/new_accounts.py` writes account blocks in bulk; see `scripts/README.md`.
+
+## Pinned accounts and fallback
+- `primary` names one proxy from `mihomo/providers/mine.yaml`. Mihomo does not resolve provider proxies by name, so the generator inlines those definitions into the generated config; a name that is not in the file fails generation instead of starting a dead group.
+- With `primary` plus `subscriptions`, the group is a `fallback` chain: the pinned proxy first, then the free pool. When the pinned proxy dies the account silently continues on a free node.
+- `lock_proxy = true` removes every fallback source for that account. When its proxy is down the connection is rejected instead of leaving through a free node. The generator refuses to combine `lock_proxy` with `fallback`/`subscriptions`.
+- `fallback = ["name"]` inserts extra named proxies between the primary and the free pool.
+
+## Global pool endpoints
+- `17890` (from `HOST_MIXED_PORT`) is the `POOL` group: subscriptions, local pools, and custom proxies.
+- Two optional extra endpoints split that mix:
+  ```toml
+  [global_pools]
+  free_port = 17891    # FREE group: subscriptions and local pools only
+  custom_port = 17892  # CUSTOM group: mihomo/providers/mine.yaml only
+  ```
+- Both bind to `127.0.0.1` only, like every other port in the stack.
+- A port that has no matching source is a generation error: `custom_port` without custom proxies, or `free_port` without any subscription or pool.
 
 ## Quickstart
 ```powershell
 Copy-Item .env.example .env
+Copy-Item services.example.toml services.toml
 # ports default to 7890/9090 — change them in .env, README examples follow .env
 # private upstreams are optional — free pool works alone:
 # Copy-Item mihomo\providers\mine.yaml.example mihomo\providers\mine.yaml
-# then uncomment the mine block in mihomo\config.yaml and add `mine` to both groups
-# and set PROVIDER_NAMES=free-vless,mine in .env
-docker compose config
-docker compose up -d
+# local pool aggregation is optional — copy pool-sources.example.toml to
+# pool-sources.toml to switch the pool-aggregation profile on.
+powershell -ExecutionPolicy Bypass -File .\scripts\reload.ps1
 curl.exe --proxy http://127.0.0.1:7890 https://www.gstatic.com/generate_204 -o NUL -w "%{http_code}`n"
 ```
 
 ## Scaling ports
-Publishing another port is one mapping line in `docker-compose.yml` plus one
-variable in `.env` / `.env.example` — no rebuild, `docker compose up -d` only.
+Add another `[[services]]` block with a fixed localhost port in `services.toml`, then run `scripts/reload.ps1`. Service ports do not need variables in `.env`.
 
 ## Manual rotation
 ```powershell
@@ -45,20 +118,30 @@ variable in `.env` / `.env.example` — no rebuild, `docker compose up -d` only.
 Invoke-RestMethod http://127.0.0.1:9090/proxies/POOL | Select-Object -ExpandProperty all
 # pin a node
 Invoke-RestMethod -Method Put http://127.0.0.1:9090/proxies/POOL -Body '{"name":"node-17"}' -ContentType 'application/json'
+# pool worker health, including per-source node counts and dropped nodes
+docker exec proxy-pool-pool-worker python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8080/healthz').read().decode())"
 ```
+Controller and mixed ports in those examples are container ports; on the host use the values of `HOST_CONTROLLER_PORT` and `HOST_MIXED_PORT` from `.env`.
 
 ## Publishing to GitHub
 ```powershell
 git remote add origin https://github.com/<you>/proxy-pool.git
 git push -u origin master
 ```
-`.env` and `mihomo/providers/mine.yaml` are gitignored — secrets never leave the machine.
+`.env`, `services.toml`, `pool-sources.toml`, `mihomo/providers/mine.yaml`, and `mihomo/generated/` are gitignored — secrets never leave the machine.
 
 ## Layout
 - `docker-compose.yml` / `.env.example` — topology and tunables (single source).
-- `mihomo/config.yaml` — isolated production/test groups, internal speed-test
-  listener and TG/YT rules.
+- `mihomo/config.base.yaml` — template: isolated production/test groups, internal speed-test listener and TG/YT rules.
+- `services.example.toml` / `services.toml` — dispatcher, subscriptions, pinned proxies, and fixed-port service-to-proxy mapping; one block can be copied for each service or account, and the same proxy may appear in multiple blocks.
+- `pool-sources.example.toml` / `pool-sources.toml` — remote source catalog, pool membership, caps, and shared-pool policy.
+- `scripts/generate.py` — validates the mapping and generates active config/Compose override.
+- `scripts/new_accounts.py` — writes dispatcher account blocks with generated passwords.
+- `pool-worker/worker.py` — SubConv client, node validation, canonical dedupe, deterministic pool builder, and internal pool HTTP endpoint.
 - `mihomo/providers/mine.yaml.example` — template for private upstreams.
+- `mihomo/generated/config.yaml` — generated active config; never edit it by hand.
 - `speed-tester/tester.py` — throughput sweeps (stdlib only, structured logs).
 - `speed-tester/history.py` — SQLite sweep history and cooldown tracking.
+- `scripts/README.md` — what each script does and every error it can raise.
 - `scripts/smoke.ps1` — config + syntax sanity checks.
+- `scripts/reload.ps1` — regenerate, wait for the pool worker, validate with Mihomo, then recreate the relay and tester.

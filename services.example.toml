@@ -1,0 +1,75 @@
+[health]
+url = "https://www.gstatic.com/generate_204"
+interval = 60
+timeout = 5000
+max_failed_times = 3
+expected_status = 204
+
+# Optional single authenticated entry point for clients that support proxy auth.
+# Each service below can add username/password; IN-USER routes it to SVC_<name>.
+# With credentials, a service no longer needs its own port.
+# [dispatcher]
+# port = 20000
+
+# Two extra global endpoints, both fixed on 127.0.0.1.
+# free_port  -> FREE group: every subscription and local pool, no custom proxies.
+# custom_port -> CUSTOM group: only proxies from mihomo/providers/mine.yaml.
+# The default 17890 endpoint stays the "everything" POOL group.
+# [global_pools]
+# free_port = 17891
+# custom_port = 17892
+
+# Add one [[subscriptions]] block per remote subscription.
+# Mihomo accepts Clash/Mihomo YAML, URI lists, and base64 subscriptions.
+# The URL stays in this gitignored file.
+#
+# [[subscriptions]]
+# name = "my-vless"
+# url = "https://example.com/subscription"
+# interval = 21600
+
+# One [[services]] block per client: a Windows app, or one account behind the
+# dispatcher. Up to 300 entries.
+#
+# port         - fixed 127.0.0.1 port for this service. Omit it when the service
+#                has username/password and reaches the stack through [dispatcher].
+# primary      - name of one proxy from mihomo/providers/mine.yaml. It is tried
+#                first; generation fails if the name is not in that file.
+# subscriptions- free providers used as fallback when primary is down.
+# lock_proxy   - true pins the account to primary: no fallback, so the client is
+#                disconnected instead of silently using a free node. Requires
+#                that fallback and subscriptions are left out.
+# fallback     - extra named proxies tried after primary, before subscriptions.
+#
+# Pinned account that survives on the free pool when its proxy dies:
+#
+# [[services]]
+# name = "acc01"
+# primary = "my-proxy-01"
+# subscriptions = ["my-vless"]
+# username = "acc01"
+# password = "change-me-at-least-8"
+#
+# Same account with its own port instead of the dispatcher:
+#
+# [[services]]
+# name = "acc01"
+# port = 20001
+# primary = "my-proxy-01"
+# subscriptions = ["my-vless"]
+#
+# Account locked to its own proxy, never falls back to a free node:
+#
+# [[services]]
+# name = "acc02"
+# primary = "my-proxy-02"
+# lock_proxy = true
+# username = "acc02"
+# password = "change-me-at-least-8"
+#
+# Plain pool service, no custom proxy at all:
+#
+# [[services]]
+# name = "telegram"
+# port = 20001
+# subscriptions = ["my-vless"]

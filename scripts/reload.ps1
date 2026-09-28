@@ -1,0 +1,38 @@
+$ErrorActionPreference = "Stop"
+
+if (-not (Test-Path -LiteralPath ".\services.toml")) {
+    Copy-Item -LiteralPath ".\services.example.toml" -Destination ".\services.toml"
+}
+
+$composeProfile = if (Test-Path -LiteralPath ".\pool-sources.toml") { @("--profile", "pool-aggregation") } else { @() }
+
+python .\scripts\generate.py
+if ($LASTEXITCODE -ne 0) { throw "service config generation failed" }
+
+docker compose @composeProfile config --quiet
+if ($LASTEXITCODE -ne 0) { throw "docker compose config failed" }
+
+# Pool providers are served over the internal network, so the worker must be
+# healthy before Mihomo validates or loads the generated config.
+if ($composeProfile.Count -gt 0) {
+    docker compose @composeProfile up -d --build --force-recreate proxy-pool-subconv proxy-pool-pool-worker
+    if ($LASTEXITCODE -ne 0) { throw "pool-aggregation startup failed" }
+
+    $workerReady = $false
+    for ($attempt = 0; $attempt -lt 60; $attempt++) {
+        $health = docker inspect --format "{{.State.Health.Status}}" proxy-pool-pool-worker 2>$null
+        if ($health -eq "healthy") { $workerReady = $true; break }
+        Start-Sleep -Seconds 5
+    }
+    if (-not $workerReady) { throw "pool-worker did not become healthy" }
+}
+
+docker compose run --rm --no-deps --entrypoint /mihomo proxy-pool-mihomo-relay -t -d /etc/mihomo -f /etc/mihomo/generated/config.yaml
+if ($LASTEXITCODE -ne 0) { throw "Mihomo rejected the generated config" }
+
+# Only the relay and tester are recreated here: the pool services are already
+# healthy, and recreating them again would empty the pools during startup.
+docker compose up -d --build --force-recreate proxy-pool-mihomo-relay proxy-pool-speed-tester
+if ($LASTEXITCODE -ne 0) { throw "docker compose startup failed" }
+
+Write-Host "Proxy services applied. Run 'docker compose logs -f proxy-pool-mihomo-relay' to inspect them."

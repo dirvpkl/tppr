@@ -36,12 +36,7 @@ proxy-providers:
     path: ./providers/free.yaml
     interval: 21600
     # No background checks: the tester probes selected candidates in batches.
-  # Private upstreams: copy providers/mine.yaml.example to providers/mine.yaml,
-  # then uncomment the block below. (An empty file provider is rejected, so it
-  # stays out of the default config.)
-  # mine:
-  #   type: file
-  #   path: ./providers/mine.yaml
+  # Private upstreams are added automatically when providers/mine.yaml exists.
 
 proxy-groups:
   - name: POOL

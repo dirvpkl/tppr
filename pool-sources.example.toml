@@ -1,0 +1,69 @@
+[worker]
+subconv_url = "http://proxy-pool-subconv:8080"
+endpoint = "http://proxy-pool-pool-worker:8080"
+output_dir = "/providers"
+refresh_interval_s = 900
+request_timeout_s = 30
+retry_backoff_s = 5
+max_attempts = 3
+# Parallel SubConv fetches. Sources that fail are reported, not fatal.
+max_workers = 4
+listen = "0.0.0.0"
+port = 8080
+
+[[sources]]
+name = "radikal-verified"
+url = "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs_base64.txt"
+
+[[sources]]
+name = "radikal-fast"
+url = "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/fast/configs_base64.txt"
+
+[[sources]]
+name = "mehrtat-vless"
+url = "https://raw.githubusercontent.com/mehrtat/vless-collector/main/sub.txt"
+
+[[sources]]
+name = "au1rxx-v2ray"
+url = "https://github.com/Au1rxx/free-vpn-subscriptions/raw/main/output/v2ray-base64.txt"
+
+[[sources]]
+name = "hamedcode-vless-top"
+url = "https://raw.githubusercontent.com/hamedcode/port-based-v2ray-configs/main/sub/top100.txt"
+
+[[sources]]
+name = "hamedcode-ss"
+url = "https://raw.githubusercontent.com/hamedcode/port-based-v2ray-configs/main/sub/ss.txt"
+
+[[sources]]
+name = "radikal-ss"
+url = "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/protocols/shadowsocks_base64.txt"
+
+[[sources]]
+name = "mahdibland-eternity"
+url = "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/Eternity.txt"
+
+[[sources]]
+name = "proxyscrape-socks5"
+url = "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/protocols/socks5/data.txt"
+
+[[sources]]
+name = "proxifly-http"
+url = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt"
+
+[[pools]]
+name = "free-pool"
+sources = [
+  "radikal-verified",
+  "radikal-fast",
+  "mehrtat-vless",
+  "au1rxx-v2ray",
+  "hamedcode-vless-top",
+  "hamedcode-ss",
+  "radikal-ss",
+  "mahdibland-eternity",
+  "proxyscrape-socks5",
+  "proxifly-http",
+]
+max_nodes = 1000
+shared = false

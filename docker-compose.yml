@@ -1,8 +1,8 @@
 name: proxy-pool
 
-# One local endpoint (HTTP/SOCKS) backed by a pool of upstream proxies.
-# Published host ports are approved for local use (127.0.0.1 only).
-# To expose more ports later: add one mapping line + one var in .env.example.
+# The relay exposes the global endpoint and controller on Windows localhost.
+# Additional fixed service ports are generated into docker-compose.override.yml.
+# The optional pool-aggregation profile adds internal SubConv and pool-worker services.
 
 services:
   proxy-pool-mihomo-relay:
@@ -14,7 +14,34 @@ services:
     ports:
       - "127.0.0.1:${HOST_MIXED_PORT:?host mixed proxy port is required, e.g. HOST_MIXED_PORT=7890}:7890"
       - "127.0.0.1:${HOST_CONTROLLER_PORT:?host controller port is required, e.g. HOST_CONTROLLER_PORT=9090}:9090"
-    command: ["-d", "/etc/mihomo"]
+    command: ["-d", "/etc/mihomo", "-f", "/etc/mihomo/generated/config.yaml"]
+
+  proxy-pool-subconv:
+    image: wouisb/subconv:latest
+    container_name: proxy-pool-subconv
+    restart: unless-stopped
+    profiles: ["pool-aggregation"]
+    expose:
+      - "8080"
+
+  proxy-pool-pool-worker:
+    build: ./pool-worker
+    container_name: proxy-pool-pool-worker
+    restart: unless-stopped
+    profiles: ["pool-aggregation"]
+    depends_on:
+      - proxy-pool-subconv
+    expose:
+      - "8080"
+    volumes:
+      - ./pool-sources.toml:/config/pool-sources.toml:ro
+      - ./mihomo/providers:/providers
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   proxy-pool-speed-tester:
     build: ./speed-tester

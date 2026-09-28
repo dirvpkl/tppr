@@ -1,7 +1,10 @@
 .env
+services.toml
+pool-sources.toml
 .workplanx/
-mihomo/providers/mine.yaml
-mihomo/providers/free.yaml
+mihomo/generated/
+docker-compose.override.yml
+mihomo/providers/*.yaml
 # mihomo runtime data (downloaded/geodata caches, never committed)
 mihomo/*.dat
 mihomo/*.metadb
