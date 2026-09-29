@@ -1,7 +1,9 @@
-# proxy-pool 0.9.0 — a global pool, fixed Windows ports, an optional dispatcher, pinned accounts, and local pool aggregation.
+# proxy-pool 0.10.0 — a global pool, LAN-reachable proxy ports, an optional dispatcher, pinned accounts, and local pool aggregation.
 
 ## What it does
-- `proxy-pool-mihomo-relay` exposes HTTP/SOCKS on `127.0.0.1:7890` inside Docker, published to the host as `HOST_MIXED_PORT` (17890 in the checked-in example). The
+- `proxy-pool-mihomo-relay` exposes HTTP/SOCKS inside Docker and publishes the
+  proxy ports on all host interfaces (`HOST_MIXED_PORT`, 17890 in the checked-in
+  example). The controller stays on `127.0.0.1` only. The
   `POOL` selector is the production route; the separate `TEST_POOL` selector
   is used only by the speed tester, so benchmarks never reroute live Telegram
   or YouTube connections.
@@ -25,9 +27,10 @@
 
 ## Services and fixed ports
 - Each `[[services]]` block in the gitignored `services.toml` gets a group and,
-  unless the service is reachable through the dispatcher, a fixed
-  `127.0.0.1` port. Ports are declared in that file, not in `.env`, and are
-  generated into `docker-compose.override.yml`.
+  unless the service is reachable through the dispatcher, a fixed port
+  reachable from the LAN. Ports are declared in that file, not in `.env`, and are
+  generated into `docker-compose.override.yml`. The controller API is the only
+  thing still bound to `127.0.0.1`.
 - A service selects upstream nodes in one of two ways:
   - `subscriptions = ["name", ...]` — every node of those providers;
   - `primary = "proxy-name"` — one exact proxy, optionally followed by
@@ -84,6 +87,24 @@
 - With `primary` plus `subscriptions`, the group is a `fallback` chain: the pinned proxy first, then the free pool. When the pinned proxy dies the account silently continues on a free node.
 - `lock_proxy = true` removes every fallback source for that account. When its proxy is down the connection is rejected instead of leaving through a free node. The generator refuses to combine `lock_proxy` with `fallback`/`subscriptions`.
 - `fallback = ["name"]` inserts extra named proxies between the primary and the free pool.
+- `balance = "round-robin"` turns the group into a load-balance pool: every new connection exits through the next node instead of sticking to one. It needs `subscriptions` and forbids `primary`, `fallback` and `lock_proxy`. The effective variety equals the currently healthy nodes, so a free pool rotates between its survivors.
+
+## Hash-routed expiring access
+- Three extra ports serve one pool each without touching Mihomo: `17894` reads
+  every pool file plus the custom proxies, `17895` reads the worker pools only,
+  `17896` reads the custom proxies only. Override them with `HASH_GATE_*_PORT`.
+- Authentication is also routing and expiry. The username is a hex hash that
+  picks the exit node (`int(hash, 16) % nodes`); the password is a TTL in
+  seconds, from 15 up to 30 days. The countdown starts at the first request and
+  is stored in SQLite, so restarts do not extend it. An expired credential is
+  rejected like a wrong password.
+- Generate a username with `python -c "import secrets;print(secrets.token_hex(8))"`.
+  The same hash always exits through the same node while the pool file is
+  unchanged; pool refreshes may shift the mapping.
+- Only HTTP and SOCKS5 upstreams are forwardable, so roughly two thirds of a
+  pool are reachable through these ports. The rest needs the Mihomo groups.
+- `reload.ps1` starts the gate with the pool profile and waits for it to report
+  healthy before applying anything else.
 
 ## Global pool endpoints
 - `17890` (from `HOST_MIXED_PORT`) is the `POOL` group: subscriptions, local pools, and custom proxies.
@@ -93,7 +114,7 @@
   free_port = 17891    # FREE group: subscriptions and local pools only
   custom_port = 17892  # CUSTOM group: mihomo/providers/mine.yaml only
   ```
-- Both bind to `127.0.0.1` only, like every other port in the stack.
+- Both share the LAN-reachable binding with every other proxy port in the stack; only the controller stays on `127.0.0.1`.
 - A port that has no matching source is a generation error: `custom_port` without custom proxies, or `free_port` without any subscription or pool.
 
 ## Quickstart

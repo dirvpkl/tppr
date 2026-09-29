@@ -12,7 +12,7 @@ services:
     volumes:
       - ./mihomo:/etc/mihomo
     ports:
-      - "127.0.0.1:${HOST_MIXED_PORT:?host mixed proxy port is required, e.g. HOST_MIXED_PORT=7890}:7890"
+      - "0.0.0.0:${HOST_MIXED_PORT:?host mixed proxy port is required, e.g. HOST_MIXED_PORT=7890}:7890"
       - "127.0.0.1:${HOST_CONTROLLER_PORT:?host controller port is required, e.g. HOST_CONTROLLER_PORT=9090}:9090"
     command: ["-d", "/etc/mihomo", "-f", "/etc/mihomo/generated/config.yaml"]
 
@@ -42,6 +42,42 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+
+  proxy-pool-hash-gate:
+    build: ./hash-gate
+    container_name: proxy-pool-hash-gate
+    restart: unless-stopped
+    profiles: ["pool-aggregation"]
+    depends_on:
+      - proxy-pool-pool-worker
+    expose:
+      - "17894"
+      - "17895"
+      - "17896"
+    ports:
+      - "0.0.0.0:${HASH_GATE_ALL_PORT:-17894}:${HASH_GATE_ALL_PORT:-17894}"
+      - "0.0.0.0:${HASH_GATE_FREE_PORT:-17895}:${HASH_GATE_FREE_PORT:-17895}"
+      - "0.0.0.0:${HASH_GATE_CUSTOM_PORT:-17896}:${HASH_GATE_CUSTOM_PORT:-17896}"
+    environment:
+      HASH_GATE_ALL_PORT: ${HASH_GATE_ALL_PORT:-17894}
+      HASH_GATE_FREE_PORT: ${HASH_GATE_FREE_PORT:-17895}
+      HASH_GATE_CUSTOM_PORT: ${HASH_GATE_CUSTOM_PORT:-17896}
+    volumes:
+      - ./mihomo/providers:/pools:ro
+      - ./mihomo/providers/mine.yaml:/custom/mine.yaml:ro
+      - hash-gate-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os,socket;[socket.create_connection(('127.0.0.1',int(os.environ['HASH_GATE_FREE_PORT'])),timeout=2).close()]",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   proxy-pool-speed-tester:
     build: ./speed-tester
@@ -78,3 +114,4 @@ services:
 
 volumes:
   tester-data:
+  hash-gate-data:

@@ -67,7 +67,7 @@ fallback = ["proxy-b"]
         self.assertIn('name: "SVC_telegram"', rendered)
         self.assertIn("port: 20001", rendered)
         self.assertLess(rendered.index('"proxy-a"'), rendered.index('"proxy-b"'))
-        self.assertIn('      - "127.0.0.1:20001:20001"', override)
+        self.assertIn('      - "0.0.0.0:20001:20001"', override)
 
     def test_renders_subscription_provider_and_service_use(self) -> None:
         body = """
@@ -121,7 +121,7 @@ password = "secret123"
         self.assertIn('        password: "secret123"', rendered)
         self.assertIn("  - IN-USER,telegram,SVC_telegram", rendered)
         self.assertLess(rendered.index("IN-USER"), rendered.index("MATCH,DIRECT"))
-        self.assertIn('      - "127.0.0.1:20000:20000"', override)
+        self.assertIn('      - "0.0.0.0:20000:20000"', override)
 
     def test_rejects_dispatcher_without_credentials(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires at least one service"):
@@ -258,7 +258,7 @@ password = "secret123"
         self.assertIn('    proxy: "FREE"', rendered)
         self.assertIn('    proxy: "CUSTOM"', rendered)
         for port in ("17891", "17892", "17893"):
-            self.assertIn(f'      - "127.0.0.1:{port}:{port}"', override)
+            self.assertIn(f'      - "0.0.0.0:{port}:{port}"', override)
         self.assertNotIn("20001", override)
 
     def test_renders_custom_proxies_inline(self) -> None:
@@ -372,7 +372,7 @@ lock_proxy = true
             rendered.index("proxy-providers:"),
         )
         self.assertIn("  free-vless:\n    type: http", rendered)
-        self.assertIn('      - "127.0.0.1:17892:17892"', override)
+        self.assertIn('      - "0.0.0.0:17892:17892"', override)
 
     def test_rejects_reserved_service_port(self) -> None:
         with self.assertRaisesRegex(ValueError, "reserved by Mihomo"):
@@ -410,6 +410,54 @@ lock_proxy = true
 """,
                 set(CUSTOM),
             )
+
+    def test_renders_load_balance_group(self) -> None:
+        health, parsed, subscriptions, dispatcher, _ = self.load("""
+[[services]]
+name = "random"
+port = 20001
+subscriptions = ["extra"]
+balance = "round-robin"
+""")
+        rendered = generate.render_config(
+            BASE, parsed, subscriptions, health, {}, dispatcher
+        )
+        self.assertIn('  - name: "SVC_random"\n    type: load-balance', rendered)
+        self.assertIn("    strategy: round-robin", rendered)
+        self.assertEqual(parsed[0].balance, "round-robin")
+
+    def test_rejects_balance_with_primary(self) -> None:
+        with self.assertRaisesRegex(ValueError, "balance rotates the whole pool"):
+            self.load(
+                """
+[[services]]
+name = "one"
+port = 20001
+primary = "proxy-a"
+subscriptions = ["extra"]
+balance = "round-robin"
+""",
+                set(CUSTOM),
+            )
+
+    def test_rejects_balance_without_subscriptions(self) -> None:
+        with self.assertRaisesRegex(ValueError, "balance requires"):
+            self.load("""
+[[services]]
+name = "one"
+port = 20001
+balance = "round-robin"
+""")
+
+    def test_rejects_unknown_balance_strategy(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be one of"):
+            self.load("""
+[[services]]
+name = "one"
+port = 20001
+subscriptions = ["extra"]
+balance = "lottery"
+""")
 
 
 if __name__ == "__main__":

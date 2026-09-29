@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import yaml  # type: ignore[import-untyped]
 
 MAX_SERVICES = 1000
+BALANCE_STRATEGIES = ("round-robin", "consistent-hashing")
 MAX_SUBSCRIPTIONS = 100
 MIN_SERVICE_PORT = 1024
 MAX_SERVICE_PORT = 65535
@@ -84,6 +85,7 @@ class Service:
     username: str | None
     password: str | None
     lock_proxy: bool
+    balance: str | None
 
 
 TomlTable = dict[str, object]
@@ -352,6 +354,15 @@ def _load_services(
 
         if port is None and username is None:
             raise ValueError(f"{field} requires port or dispatcher credentials")
+
+        raw_balance = table.get("balance")
+        balance = None if raw_balance is None else _text(table, "balance")
+        if balance is not None and balance not in BALANCE_STRATEGIES:
+            raise ValueError(
+                f"{field}.balance must be one of {', '.join(BALANCE_STRATEGIES)}"
+            )
+        if balance is not None and not service_subscriptions:
+            raise ValueError(f"{field}.balance requires {field}.subscriptions")
         if primary is None and not service_subscriptions:
             raise ValueError(f"{field} requires primary or subscriptions")
 
@@ -373,6 +384,12 @@ def _load_services(
                 "to pin the primary proxy"
             )
 
+        if balance is not None and (primary is not None or fallback or lock_proxy):
+            raise ValueError(
+                f"{field}.balance rotates the whole pool, so it forbids "
+                f"{field}.primary, {field}.fallback and {field}.lock_proxy"
+            )
+
         names.add(name)
         services.append(
             Service(
@@ -384,6 +401,7 @@ def _load_services(
                 username,
                 password,
                 lock_proxy,
+                balance,
             )
         )
     if dispatcher is None and usernames:
@@ -448,10 +466,13 @@ def _quote(value: str) -> str:
 
 
 def _service_group(service: Service, health: HealthSettings) -> str:
+    group_type = "load-balance" if service.balance is not None else "fallback"
     lines = [
         f"  - name: {_quote(f'SVC_{service.name}')}",
-        "    type: fallback",
+        f"    type: {group_type}",
     ]
+    if service.balance is not None:
+        lines.append(f"    strategy: {service.balance}")
     if service.primary is not None:
         lines.append("    proxies:")
         lines.append(f"      - {_quote(service.primary)}")
@@ -714,7 +735,7 @@ def render_compose_override(
     if not ports:
         return "services: {}\n"
     lines = ["services:", "  proxy-pool-mihomo-relay:", "    ports:"]
-    lines.extend(f'      - "127.0.0.1:{port}:{port}"' for port in ports)
+    lines.extend(f'      - "0.0.0.0:{port}:{port}"' for port in ports)
     return "\n".join(lines) + "\n"
 
 

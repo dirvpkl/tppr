@@ -1,11 +1,12 @@
 # Single local endpoint (HTTP/SOCKS) backed by a pool of upstream proxies.
 # No TUN. The tester checks selected nodes in parallel and stops early.
 # Container ports 7890/7891/9090 must match docker-compose.yml and tester env.
-# allow-lan + empty secret are safe ONLY inside compose (host proxy/API ports
-# bind 127.0.0.1; port 7891 is reachable only on the private Docker network).
+# allow-lan + empty secret: host proxy ports bind 0.0.0.0 (reachable from the
+# LAN by design), the controller stays on 127.0.0.1, and port 7891 is reachable
+# only on the private Docker network).
 mixed-port: 7890
-# Container must listen on all interfaces (compose maps host 127.0.0.1 only,
-# so nothing is exposed to LAN despite allow-lan below).
+# Container must listen on all interfaces (compose maps the host side; proxy
+# ports go to 0.0.0.0, the controller stays on 127.0.0.1).
 allow-lan: true
 bind-address: "*"
 mode: rule

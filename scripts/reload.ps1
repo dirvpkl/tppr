@@ -13,9 +13,10 @@ docker compose @composeProfile config --quiet
 if ($LASTEXITCODE -ne 0) { throw "docker compose config failed" }
 
 # Pool providers are served over the internal network, so the worker must be
-# healthy before Mihomo validates or loads the generated config.
+# healthy before Mihomo validates or loads the generated config. The hash gate
+# reads the same pool files and tolerates them missing, so it starts alongside.
 if ($composeProfile.Count -gt 0) {
-    docker compose @composeProfile up -d --build --force-recreate proxy-pool-subconv proxy-pool-pool-worker
+    docker compose @composeProfile up -d --build --force-recreate proxy-pool-subconv proxy-pool-pool-worker proxy-pool-hash-gate
     if ($LASTEXITCODE -ne 0) { throw "pool-aggregation startup failed" }
 
     $workerReady = $false
@@ -25,6 +26,14 @@ if ($composeProfile.Count -gt 0) {
         Start-Sleep -Seconds 5
     }
     if (-not $workerReady) { throw "pool-worker did not become healthy" }
+
+    $gateReady = $false
+    for ($attempt = 0; $attempt -lt 24; $attempt++) {
+        $health = docker inspect --format "{{.State.Health.Status}}" proxy-pool-hash-gate 2>$null
+        if ($health -eq "healthy") { $gateReady = $true; break }
+        Start-Sleep -Seconds 5
+    }
+    if (-not $gateReady) { throw "hash-gate did not become healthy" }
 }
 
 docker compose run --rm --no-deps --entrypoint /mihomo proxy-pool-mihomo-relay -t -d /etc/mihomo -f /etc/mihomo/generated/config.yaml

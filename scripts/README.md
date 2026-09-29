@@ -43,6 +43,9 @@ service that silently fails over to a different proxy:
 | service has neither `port` nor `username` | `requires port or dispatcher credentials` |
 | `lock_proxy = true` together with a fallback source | `lock_proxy forbids ...` |
 | `lock_proxy = false` without any fallback source | `requires a fallback source` |
+| `balance` with `primary`, `fallback` or `lock_proxy` | `balance rotates the whole pool, so it forbids ...` |
+| `balance` without `subscriptions` | `balance requires ...` |
+| unknown `balance` value | `balance must be one of round-robin, consistent-hashing` |
 | password shorter than 8 characters | `at least 8 characters` |
 | two listeners on the same port | `duplicates another listener port` |
 | more than `MAX_SERVICES` entries | names the constant and the file to edit |
@@ -92,3 +95,21 @@ lock_proxy = true         # only if it must never fall back to a free node
 
 Compose config check, Python syntax check and the unit tests. It does not touch
 running containers.
+
+## Hash gate ports
+
+`proxy-pool-hash-gate` serves three ports that need no Mihomo groups at all:
+`HASH_GATE_ALL_PORT` (default 17894, every pool file plus the custom proxies),
+`HASH_GATE_FREE_PORT` (default 17895, worker pools only) and
+`HASH_GATE_CUSTOM_PORT` (default 17896, custom proxies only).
+
+Connect with a hex username and a TTL-seconds password:
+
+```powershell
+curl.exe --proxy socks5h://a1b2c3d4e5f60718:3600@host.docker.internal:17895 https://api.ipify.org
+```
+
+The same username always exits through the same node while the pool file is
+unchanged. After the TTL elapses from the first request the credential is
+rejected. Only HTTP and SOCKS5 upstreams are forwardable; a pool with none of
+those rejects every connection. Leases live in the `hash-gate-data` volume.
