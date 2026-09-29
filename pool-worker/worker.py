@@ -23,6 +23,8 @@ from urllib.request import Request, urlopen
 
 import yaml  # type: ignore[import-untyped]
 
+from common.upstream import connect_upstream
+
 SERVICE_NAME = "proxy-pool-pool-worker"
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}\Z")
 MAX_SOURCES = 100
@@ -67,9 +69,18 @@ SS_CIPHERS = frozenset(
 SS2022_CIPHERS = frozenset(
     name for name in SS_CIPHERS if name.startswith("2022-blake3")
 )
+# Shadowsocks plugin names Mihomo initializes. An unknown name or an option
+# set missing mode/host aborts the whole provider, so anything else is out.
+SS_PLUGINS = frozenset({"obfs", "obfs-local", "v2ray-plugin"})
 MIN_WORKERS = 1
 MAX_WORKERS = 16
 DEFAULT_WORKERS = 4
+MIN_CHECK_TIMEOUT_S = 1
+MAX_CHECK_TIMEOUT_S = 30
+DEFAULT_CHECK_TIMEOUT_S = 5
+MIN_CHECK_WORKERS = 1
+MAX_CHECK_WORKERS = 300
+DEFAULT_CHECK_WORKERS = 150
 DEFAULT_LISTEN = "0.0.0.0"
 DEFAULT_PORT = 8080
 
@@ -94,6 +105,15 @@ class Pool:
 
 
 @dataclass(frozen=True)
+class CheckSettings:
+    enabled: bool
+    host: str
+    port: int
+    timeout_s: int
+    workers: int
+
+
+@dataclass(frozen=True)
 class WorkerConfig:
     subconv_url: str
     output_dir: Path
@@ -104,6 +124,7 @@ class WorkerConfig:
     sources: tuple[Source, ...]
     pools: tuple[Pool, ...]
     max_workers: int
+    check: CheckSettings
     listen: str
     port: int
 
@@ -125,6 +146,8 @@ class WorkerState:
     pool_nodes: dict[str, int] = field(default_factory=dict)
     unique_nodes: int = 0
     dropped_nodes: int = 0
+    checked_nodes: int = 0
+    dead_nodes: int = 0
     last_refresh: str = ""
 
 
@@ -204,6 +227,7 @@ def _parse_config(document: TomlTable) -> WorkerConfig:
     if type(listen) is not str or not cast(str, listen).strip():
         raise ValueError("worker.listen must be a non-empty string")
     port = _integer(worker, "port", 1, 65535)
+    check = _parse_check(document.get("check"))
 
     raw_sources = _list(document.get("sources", []), "sources")
     if len(raw_sources) > MAX_SOURCES:
@@ -276,8 +300,58 @@ def _parse_config(document: TomlTable) -> WorkerConfig:
         sources=tuple(sources),
         pools=tuple(pools),
         max_workers=max_workers,
+        check=check,
         listen=cast(str, listen).strip(),
         port=port,
+    )
+
+
+def _optional_integer(
+    table: TomlTable, field: str, minimum: int, maximum: int, default: int
+) -> int:
+    if field not in table:
+        return default
+    return _integer(table, field, minimum, maximum)
+
+
+def _parse_check(raw: object) -> CheckSettings:
+    """Liveness probing. Absent section means disabled, never a surprise slowdown."""
+    if raw is None:
+        return CheckSettings(
+            False, "", 0, DEFAULT_CHECK_TIMEOUT_S, DEFAULT_CHECK_WORKERS
+        )
+    table = _table(raw, "check")
+    enabled = table.get("enabled", True)
+    if type(enabled) is not bool:
+        raise ValueError("check.enabled must be a boolean")
+    url = _text(table, "url")
+    parsed = urlparse(url)
+    if parsed.scheme == "https":
+        port = parsed.port or 443
+    elif parsed.scheme == "http":
+        port = parsed.port or 80
+    else:
+        raise ValueError("check.url must be an HTTP(S) URL")
+    if not parsed.hostname:
+        raise ValueError("check.url must contain a host")
+    return CheckSettings(
+        enabled=cast(bool, enabled),
+        host=parsed.hostname,
+        port=port,
+        timeout_s=_optional_integer(
+            table,
+            "timeout_s",
+            MIN_CHECK_TIMEOUT_S,
+            MAX_CHECK_TIMEOUT_S,
+            DEFAULT_CHECK_TIMEOUT_S,
+        ),
+        workers=_optional_integer(
+            table,
+            "workers",
+            MIN_CHECK_WORKERS,
+            MAX_CHECK_WORKERS,
+            DEFAULT_CHECK_WORKERS,
+        ),
     )
 
 
@@ -326,6 +400,20 @@ def _is_usable(proxy: YamlMapping) -> bool:
                 if not base64.b64decode(str(proxy["password"]), validate=True):
                     return False
             except (binascii.Error, ValueError):
+                return False
+        plugin = proxy.get("plugin")
+        if plugin is not None:
+            if plugin not in SS_PLUGINS:
+                return False
+            opts = proxy.get("plugin-opts")
+            if type(opts) is dict:
+                mode = opts.get("mode")
+                host = opts.get("host")
+                if type(mode) is not str or not mode.strip():
+                    return False
+                if type(host) is not str or not host.strip():
+                    return False
+            elif type(opts) is not str or not opts.strip():
                 return False
     if kind == "snell" and not proxy.get("psk"):
         return False
@@ -419,6 +507,52 @@ def _merge_sources(
     return nodes, dropped
 
 
+def _check_node(node: Node, host: str, port: int, timeout_s: float) -> bool:
+    """True when the proxy completes a tunnel to the check target.
+
+    Nodes of types the checker cannot speak pass through untouched; filtering
+    them would gut the pool on a capability gap, not on evidence.
+    """
+    proxy = node.proxy
+    if proxy.get("type") not in {"http", "socks5"}:
+        return True
+    try:
+        sock = connect_upstream(proxy, host, port, timeout_s)
+    except (OSError, ValueError):
+        return False
+    try:
+        sock.close()
+    except OSError:
+        pass
+    return True
+
+
+def _check_all(
+    config: WorkerConfig, nodes: dict[str, Node]
+) -> tuple[dict[str, Node], int, int]:
+    check = config.check
+    fingerprints = sorted(nodes)
+    if not fingerprints:
+        return {}, 0, 0
+    workers = min(check.workers, len(fingerprints))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        results = {
+            fingerprint: executor.submit(
+                _check_node,
+                nodes[fingerprint],
+                check.host,
+                check.port,
+                float(check.timeout_s),
+            )
+            for fingerprint in fingerprints
+        }
+    live: dict[str, Node] = {}
+    for fingerprint in fingerprints:
+        if results[fingerprint].result():
+            live[fingerprint] = nodes[fingerprint]
+    return live, len(fingerprints), len(fingerprints) - len(live)
+
+
 def _node_name(pool: Pool, node: Node) -> str:
     raw_name = node.proxy.get("name")
     label = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(raw_name)).strip("-")
@@ -473,10 +607,25 @@ def refresh(config: WorkerConfig, state: WorkerState) -> bool:
     source_proxies, errors = _fetch_all(config)
     if not source_proxies:
         raise RuntimeError("all sources failed; keeping the previous pool snapshot")
+    required = max(1, (len(config.sources) + 1) // 2)
+    if len(source_proxies) < required:
+        raise RuntimeError(
+            f"only {len(source_proxies)}/{len(config.sources)} sources responded; "
+            "keeping the previous pool snapshot"
+        )
     nodes, dropped = _merge_sources(config, source_proxies)
     if not nodes:
         raise RuntimeError(
             "sources returned no usable nodes; keeping the previous snapshot"
+        )
+    total = len(nodes)
+    checked = dead = 0
+    if config.check.enabled:
+        nodes, checked, dead = _check_all(config, nodes)
+        LOG.info("check complete live=%d dead=%d", checked - dead, dead)
+    if not nodes:
+        raise RuntimeError(
+            "no live nodes after checking; keeping the previous snapshot"
         )
     buckets = _pool_nodes(config, nodes)
     snapshots: dict[str, bytes] = {}
@@ -492,16 +641,20 @@ def refresh(config: WorkerConfig, state: WorkerState) -> bool:
             name: len(items) for name, items in source_proxies.items()
         }
         state.pool_nodes = {name: len(items) for name, items in buckets.items()}
-        state.unique_nodes = len(nodes)
+        state.unique_nodes = total
         state.dropped_nodes = dropped
+        state.checked_nodes = checked
+        state.dead_nodes = dead
         state.last_refresh = datetime.now(timezone.utc).isoformat(timespec="seconds")
     LOG.info(
         "refresh complete sources_ok=%d sources_failed=%d unique_nodes=%d "
-        "dropped_nodes=%d pools=%d",
+        "dropped_nodes=%d checked_nodes=%d dead_nodes=%d pools=%d",
         len(source_proxies),
         len(errors),
-        len(nodes),
+        total,
         dropped,
+        checked,
+        dead,
         len(config.pools),
     )
     return True
@@ -514,6 +667,8 @@ def _health_payload(state: WorkerState) -> bytes:
             "ready": state.ready,
             "unique_nodes": state.unique_nodes,
             "dropped_nodes": state.dropped_nodes,
+            "checked_nodes": state.checked_nodes,
+            "dead_nodes": state.dead_nodes,
             "sources_ok": len(state.source_nodes),
             "sources_failed": len(state.source_errors),
             "source_nodes": dict(sorted(state.source_nodes.items())),

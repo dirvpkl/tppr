@@ -1,0 +1,7 @@
+# Root-context builds (pool-worker, hash-gate) must never see secrets or junk.
+# Everything is excluded except the service directories and the shared lib.
+# Per-service contexts (api, speed-tester) use their own directories only.
+*
+!pool-worker/
+!hash-gate/
+!common/

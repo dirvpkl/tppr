@@ -1,10 +1,12 @@
 import dataclasses
+import socket
 import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import worker
@@ -20,6 +22,7 @@ class WorkerTests(unittest.TestCase):
             retry_backoff_s=5,
             max_attempts=3,
             max_workers=2,
+            check=worker.CheckSettings(False, "", 0, 8, 10),
             sources=(
                 worker.Source("one", "https://example.com/one"),
                 worker.Source("two", "https://example.com/two"),
@@ -88,6 +91,7 @@ class WorkerTests(unittest.TestCase):
             retry_backoff_s=5,
             max_attempts=3,
             max_workers=2,
+            check=worker.CheckSettings(False, "", 0, 8, 10),
             sources=(worker.Source("one", "https://example.com/one"),),
             pools=(
                 worker.Pool("alpha", ("one",), 10, True),
@@ -186,6 +190,32 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(dropped, 2)
         self.assertEqual(list(nodes), [worker._fingerprint(good)])
 
+    def test_drops_ss_plugin_without_mode(self) -> None:
+        config = self.config()
+        good: worker.YamlMapping = {
+            "name": "good-obfs",
+            "type": "ss",
+            "server": "a.example",
+            "port": 8388,
+            "cipher": "aes-128-gcm",
+            "password": "secret",
+            "plugin": "v2ray-plugin",
+            "plugin-opts": {"mode": "websocket", "host": "example.com"},
+        }
+        bad: worker.YamlMapping = {
+            "name": "bad-obfs",
+            "type": "ss",
+            "server": "b.example",
+            "port": 8388,
+            "cipher": "aes-128-gcm",
+            "password": "secret",
+            "plugin": "v2ray-plugin",
+            "plugin-opts": {"tls": True},
+        }
+        nodes, dropped = worker._merge_sources(config, {"one": [good, bad]})
+        self.assertEqual(dropped, 1)
+        self.assertEqual(len(nodes), 1)
+
     def test_all_sources_failed_keeps_previous_snapshot(self) -> None:
         config = self.config()
         original = worker._fetch_all
@@ -196,6 +226,174 @@ class WorkerTests(unittest.TestCase):
                 worker.refresh(config, state)
             self.assertFalse(state.ready)
             self.assertIsNone(state.snapshots)
+        finally:
+            worker._fetch_all = original
+
+    def test_check_config_defaults_to_disabled(self) -> None:
+        document: worker.TomlTable = {
+            "worker": {
+                "subconv_url": "http://subconv:8080",
+                "output_dir": "providers",
+                "refresh_interval_s": 900,
+                "request_timeout_s": 30,
+                "retry_backoff_s": 5,
+                "max_attempts": 3,
+                "listen": "0.0.0.0",
+                "port": 8080,
+            },
+            "sources": [{"name": "s", "url": "https://example.com/s"}],
+            "pools": [{"name": "x", "sources": ["s"], "max_nodes": 1, "shared": False}],
+        }
+        config = worker._parse_config(document)
+        self.assertFalse(config.check.enabled)
+
+    def test_check_config_parses(self) -> None:
+        document: worker.TomlTable = {
+            "worker": {
+                "subconv_url": "http://subconv:8080",
+                "output_dir": "providers",
+                "refresh_interval_s": 900,
+                "request_timeout_s": 30,
+                "retry_backoff_s": 5,
+                "max_attempts": 3,
+                "listen": "0.0.0.0",
+                "port": 8080,
+            },
+            "sources": [{"name": "s", "url": "https://example.com/s"}],
+            "pools": [{"name": "x", "sources": ["s"], "max_nodes": 1, "shared": False}],
+            "check": {
+                "url": "https://example.com/health",
+                "timeout_s": 5,
+                "workers": 10,
+            },
+        }
+        config = worker._parse_config(document)
+        self.assertTrue(config.check.enabled)
+        self.assertEqual(
+            config.check,
+            worker.CheckSettings(True, "example.com", 443, 5, 10),
+        )
+
+    def test_check_config_rejects_bad_url(self) -> None:
+        document: worker.TomlTable = {
+            "worker": {
+                "subconv_url": "http://subconv:8080",
+                "output_dir": "providers",
+                "refresh_interval_s": 900,
+                "request_timeout_s": 30,
+                "retry_backoff_s": 5,
+                "max_attempts": 3,
+                "listen": "0.0.0.0",
+                "port": 8080,
+            },
+            "sources": [{"name": "s", "url": "https://example.com/s"}],
+            "pools": [{"name": "x", "sources": ["s"], "max_nodes": 1, "shared": False}],
+            "check": {"url": "socks5://example.com:1080"},
+        }
+        with self.assertRaisesRegex(ValueError, "HTTP"):
+            worker._parse_config(document)
+
+    def test_check_all_keeps_live_nodes(self) -> None:
+        stop = threading.Event()
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        listener.settimeout(0.5)
+        upstream = int(listener.getsockname()[1])
+
+        def serve() -> None:
+            while not stop.is_set():
+                try:
+                    conn, _ = listener.accept()
+                except OSError:
+                    continue
+                threading.Thread(target=handle, args=(conn,), daemon=True).start()
+
+        def handle(conn: socket.socket) -> None:
+            with conn:
+                try:
+                    head = b""
+                    conn.settimeout(5.0)
+                    while b"\r\n\r\n" not in head:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            return
+                        head += chunk
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                except OSError:
+                    return
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            config = dataclasses.replace(
+                self.config(),
+                check=worker.CheckSettings(True, "example.com", 443, 5, 4),
+            )
+            live_proxy: worker.YamlMapping = {
+                "name": "live",
+                "type": "http",
+                "server": "127.0.0.1",
+                "port": upstream,
+            }
+            dead_proxy: worker.YamlMapping = {
+                "name": "dead",
+                "type": "http",
+                "server": "127.0.0.1",
+                "port": 1,
+            }
+            other_proxy: worker.YamlMapping = {
+                "name": "other",
+                "type": "vless",
+                "server": "x.example",
+                "port": 443,
+                "uuid": "6f0c1a2b-3c4d-5e6f-8a9b-0c1d2e3f4a5b",
+            }
+            nodes: dict[str, worker.Node] = {}
+            for proxy in (live_proxy, dead_proxy, other_proxy):
+                fingerprint = worker._fingerprint(proxy)
+                nodes[fingerprint] = worker.Node(dict(proxy), fingerprint, {"one"})
+            live, checked, dead = worker._check_all(config, nodes)
+            self.assertEqual(checked, 3)
+            self.assertEqual(dead, 1)
+            self.assertEqual(len(live), 2)
+            names = {node.proxy["name"] for node in live.values()}
+            self.assertEqual(names, {"live", "other"})
+        finally:
+            stop.set()
+            listener.close()
+
+    def test_partial_sources_below_majority_keeps_snapshot(self) -> None:
+        config = dataclasses.replace(
+            self.config(),
+            sources=(
+                worker.Source("one", "https://example.com/one"),
+                worker.Source("two", "https://example.com/two"),
+                worker.Source("three", "https://example.com/three"),
+            ),
+        )
+        original = worker._fetch_all
+        worker._fetch_all = lambda worker_config: (  # type: ignore[assignment]
+            {
+                "one": [
+                    {
+                        "name": "A",
+                        "type": "ss",
+                        "server": "a.example",
+                        "port": 8388,
+                        "cipher": "aes-128-gcm",
+                        "password": "secret",
+                    }
+                ]
+            },
+            {"two": "boom", "three": "boom"},
+        )
+        try:
+            state = worker.WorkerState(lock=threading.Lock())
+            with self.assertRaisesRegex(RuntimeError, "only 1/3 sources"):
+                worker.refresh(config, state)
+            self.assertFalse(state.ready)
         finally:
             worker._fetch_all = original
 

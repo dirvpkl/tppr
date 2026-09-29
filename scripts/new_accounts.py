@@ -50,6 +50,10 @@ def _dispatcher_port(text: str) -> int | None:
     return int(port.group(1))
 
 
+def random_password(length: int = 16) -> str:
+    return "".join(secrets.choice(PASSWORD_ALPHABET) for _ in range(length))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Generate dispatcher accounts in services.toml"
@@ -105,9 +109,7 @@ def main() -> int:
     providers = ", ".join(f'"{provider}"' for provider in args.provider)
     blocks = []
     for name in names:
-        password = "".join(
-            secrets.choice(PASSWORD_ALPHABET) for _ in range(args.password_length)
-        )
+        password = random_password(args.password_length)
         blocks.append(
             "\n[[services]]\n"
             f'name = "{name}"\n'

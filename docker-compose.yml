@@ -12,7 +12,9 @@ services:
     volumes:
       - ./mihomo:/etc/mihomo
     ports:
-      - "0.0.0.0:${HOST_MIXED_PORT:?host mixed proxy port is required, e.g. HOST_MIXED_PORT=7890}:7890"
+      # The mixed endpoint is intentionally unpublished: pool access goes
+      # through authenticated dispatcher accounts, fixed service ports and
+      # the hash gate. The controller stays on localhost.
       - "127.0.0.1:${HOST_CONTROLLER_PORT:?host controller port is required, e.g. HOST_CONTROLLER_PORT=9090}:9090"
     command: ["-d", "/etc/mihomo", "-f", "/etc/mihomo/generated/config.yaml"]
 
@@ -25,7 +27,9 @@ services:
       - "8080"
 
   proxy-pool-pool-worker:
-    build: ./pool-worker
+    build:
+      context: .
+      dockerfile: ./pool-worker/Dockerfile
     container_name: proxy-pool-pool-worker
     restart: unless-stopped
     profiles: ["pool-aggregation"]
@@ -44,7 +48,9 @@ services:
       start_period: 30s
 
   proxy-pool-hash-gate:
-    build: ./hash-gate
+    build:
+      context: .
+      dockerfile: ./hash-gate/Dockerfile
     container_name: proxy-pool-hash-gate
     restart: unless-stopped
     profiles: ["pool-aggregation"]
@@ -55,9 +61,9 @@ services:
       - "17895"
       - "17896"
     ports:
+      # Only the all-pools gateway is published. The free/custom gateways keep
+      # listening inside the compose network; publish them here to enable.
       - "0.0.0.0:${HASH_GATE_ALL_PORT:-17894}:${HASH_GATE_ALL_PORT:-17894}"
-      - "0.0.0.0:${HASH_GATE_FREE_PORT:-17895}:${HASH_GATE_FREE_PORT:-17895}"
-      - "0.0.0.0:${HASH_GATE_CUSTOM_PORT:-17896}:${HASH_GATE_CUSTOM_PORT:-17896}"
     environment:
       HASH_GATE_ALL_PORT: ${HASH_GATE_ALL_PORT:-17894}
       HASH_GATE_FREE_PORT: ${HASH_GATE_FREE_PORT:-17895}
@@ -111,6 +117,36 @@ services:
       HISTORY_WINDOW_H: ${HISTORY_WINDOW_H:?history window in hours is required, e.g. HISTORY_WINDOW_H=24}
     volumes:
       - tester-data:/app/data
+
+  proxy-pool-api:
+    build: ./api
+    container_name: proxy-pool-api
+    restart: unless-stopped
+    expose:
+      - "8080"
+    ports:
+      - "127.0.0.1:${API_PORT:-18080}:${API_PORT:-18080}"
+    environment:
+      API_TOKEN: ${API_TOKEN:?management API token is required, generate one with python -c "import secrets;print(secrets.token_urlsafe(32))"}
+      PORT: ${API_PORT:-18080}
+      WORKER_URL: http://proxy-pool-pool-worker:8080
+    volumes:
+      - ./services.toml:/config/services.toml
+      - ./mihomo:/mihomo:ro
+      - ./scripts:/scripts:ro
+      - hash-gate-data:/hashdata
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import http.client,os;c=http.client.HTTPConnection('127.0.0.1',int(os.environ.get('PORT','8080')),timeout=2);c.request('GET','/');print(c.getresponse().status)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
 volumes:
   tester-data:

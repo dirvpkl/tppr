@@ -1,15 +1,17 @@
 """Hash-routed proxy gateway.
 
 Listens on one TCP port per pool (SOCKS5 and HTTP CONNECT on the same port).
-Authentication doubles as routing and expiry:
+Every connection exits through a uniformly random pool node; authentication
+only gates lifetime:
 
-- username: hex hash selecting the upstream node, ``int(hash, 16) % len(nodes)``
+- username: any name identifying the credential, 1-64 chars of
+  ``[A-Za-z0-9_.-]`` (a hex hash works fine too, it carries no meaning)
 - password: TTL in seconds, digits only, ``MIN_TTL_S``..``MAX_TTL_S``
 
 The first request records ``first_seen`` in SQLite; every later connection is
-rejected once ``now > first_seen + TTL``. The countdown starts at the first
-request, not at creation. There is no password to guess: any hash is a valid
-username, and each hash deterministically pins one exit node while it lives.
+rejected once ``now > first_seen + TTL``. There is no password to guess and no
+stable exit: rotation comes from picking a fresh node per connection. A dead
+pick is retried transparently against other random nodes of the same pool.
 
 Upstream nodes come from the pool files and must be HTTP or SOCKS5 proxies;
 the gateway forwards with plain sockets and cannot speak vless/vmess/ss.
@@ -22,6 +24,7 @@ import base64
 import binascii
 import logging
 import os
+import random
 import re
 import select
 import socket
@@ -35,11 +38,14 @@ from typing import cast
 
 import yaml  # type: ignore[import-untyped]
 
+from common.upstream import connect_upstream, read_exact, read_http_head
+
 SERVICE_NAME = "proxy-pool-hash-gate"
-HASH_RE = re.compile(r"[0-9a-fA-F]{8,64}\Z")
+USER_RE = re.compile(r"[A-Za-z0-9_.\-]{1,64}\Z")
 TTL_RE = re.compile(r"[0-9]{1,10}\Z")
-MIN_TTL_S = 15
+MIN_TTL_S = 5
 MAX_TTL_S = 30 * 24 * 3600
+UPSTREAM_ATTEMPTS = 5
 MIN_PORT = 1
 MAX_PORT = 65535
 IDLE_TIMEOUT_S = 300
@@ -139,7 +145,7 @@ def _pool_nodes(state: GateState, spec: PoolSpec) -> list[YamlMapping]:
 
 
 def _check_user(user: str) -> bool:
-    return HASH_RE.fullmatch(user) is not None
+    return USER_RE.fullmatch(user) is not None
 
 
 def _check_ttl(password: str) -> int | None:
@@ -156,12 +162,12 @@ def _lease_ok(state: GateState, pool: str, user: str, ttl: int) -> bool:
     with state.lock:
         row = state.db.execute(
             "SELECT first_seen, ttl FROM leases WHERE pool = ? AND h = ?",
-            (pool, user.lower()),
+            (pool, user),
         ).fetchone()
         if row is None:
             state.db.execute(
                 "INSERT INTO leases(pool, h, first_seen, ttl) VALUES(?, ?, ?, ?)",
-                (pool, user.lower(), int(now), ttl),
+                (pool, user, int(now), ttl),
             )
             state.db.execute(
                 "DELETE FROM leases WHERE first_seen + ttl < ?",
@@ -174,103 +180,24 @@ def _lease_ok(state: GateState, pool: str, user: str, ttl: int) -> bool:
     return now <= first_seen + stored_ttl
 
 
-def _pick_node(nodes: list[YamlMapping], user: str) -> YamlMapping:
-    return nodes[int(user, 16) % len(nodes)]
+def _connect_pool(
+    nodes: list[YamlMapping], host: str, port: int, pool: str
+) -> socket.socket:
+    """Connect through up to UPSTREAM_ATTEMPTS distinct random nodes.
 
-
-def _connect_upstream(node: YamlMapping, host: str, port: int) -> socket.socket:
-    kind = str(node.get("type"))
-    server = str(node["server"])
-    node_port = int(cast(int, node["port"]))
-    username = node.get("username")
-    password = node.get("password")
-    sock = socket.create_connection((server, node_port), timeout=CONNECT_TIMEOUT_S)
-    try:
-        if kind == "http":
-            request = f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n"
-            if type(username) is str and type(password) is str:
-                token = base64.b64encode(f"{username}:{password}".encode()).decode()
-                request += f"Proxy-Authorization: Basic {token}\r\n"
-            request += "\r\n"
-            sock.sendall(request.encode())
-            response = _read_http_head(sock)
-            if not response.startswith("HTTP/1.1 200") and not response.startswith(
-                "HTTP/1.0 200"
-            ):
-                raise OSError(f"upstream http rejected: {response.splitlines()[0]}")
-        else:
-            has_creds = type(username) is str and type(password) is str
-            sock.sendall(b"\x05\x02\x00\x02" if has_creds else b"\x05\x01\x00")
-            choice = _read_exact(sock, 2)
-            if len(choice) != 2 or choice[0] != 0x05:
-                raise OSError("upstream socks5 handshake failed")
-            if choice[1] == 0x02:
-                user = str(username).encode()
-                word = str(password).encode()
-                sock.sendall(
-                    b"\x01" + bytes([len(user)]) + user + bytes([len(word)]) + word
-                )
-                auth = _read_exact(sock, 2)
-                if len(auth) != 2 or auth[1] != 0x00:
-                    raise OSError("upstream socks5 auth failed")
-            elif choice[1] != 0x00:
-                raise OSError("upstream socks5 needs unsupported auth")
-            try:
-                packed = socket.inet_aton(host)
-                connect = b"\x05\x01\x00\x01" + packed + port.to_bytes(2, "big")
-            except OSError:
-                encoded = host.encode()
-                connect = (
-                    b"\x05\x01\x00\x03"
-                    + bytes([len(encoded)])
-                    + encoded
-                    + port.to_bytes(2, "big")
-                )
-            sock.sendall(connect)
-            reply = _read_exact(sock, 4)
-            if len(reply) != 4 or reply[1] != 0x00:
-                raise OSError("upstream socks5 connect failed")
-            _drain_socks5_address(sock, reply[3])
-    except OSError:
-        sock.close()
-        raise
-    return sock
-
-
-def _read_exact(sock: socket.socket, size: int) -> bytes:
-    data = b""
-    sock.settimeout(CONNECT_TIMEOUT_S)
-    while len(data) < size:
-        chunk = sock.recv(size - len(data))
-        if not chunk:
-            break
-        data += chunk
-    return data
-
-
-def _read_http_head(sock: socket.socket) -> str:
-    data = b""
-    sock.settimeout(CONNECT_TIMEOUT_S)
-    while b"\r\n\r\n" not in data:
-        chunk = sock.recv(4096)
-        if not chunk:
-            break
-        data += chunk
-        if len(data) > 65536:
-            raise OSError("upstream http head too large")
-    return data.decode("latin-1")
-
-
-def _drain_socks5_address(sock: socket.socket, kind: int) -> None:
-    if kind == 0x01:
-        _read_exact(sock, 4 + 2)
-    elif kind == 0x03:
-        length = _read_exact(sock, 1)
-        _read_exact(sock, (length[0] if length else 0) + 2)
-    elif kind == 0x04:
-        _read_exact(sock, 16 + 2)
-    else:
-        raise OSError("upstream socks5 bad address type")
+    Candidates are drawn without replacement, so a retry never repeats the
+    node that just failed and never walks the pool in a fixed order.
+    """
+    last_error: OSError | None = None
+    for node in random.sample(nodes, min(len(nodes), UPSTREAM_ATTEMPTS)):
+        try:
+            return connect_upstream(node, host, port, CONNECT_TIMEOUT_S)
+        except OSError as exc:
+            last_error = exc
+            LOG.debug(
+                "upstream failed pool=%s node=%s: %s", pool, node.get("name"), exc
+            )
+    raise OSError(f"all upstream attempts failed in pool {pool}") from last_error
 
 
 def _relay(left: socket.socket, right: socket.socket) -> None:
@@ -340,7 +267,7 @@ class HashGateHandler(socketserver.BaseRequestHandler):
 
     def _authorize(
         self, state: GateState, spec: PoolSpec, user: str, password: str
-    ) -> YamlMapping | None:
+    ) -> list[YamlMapping] | None:
         if not _check_user(user):
             return None
         ttl = _check_ttl(password)
@@ -350,7 +277,6 @@ class HashGateHandler(socketserver.BaseRequestHandler):
         if not nodes:
             LOG.warning("pool %s has no forwardable nodes", spec.name)
             return None
-        node = _pick_node(nodes, user)
         if not _lease_ok(state, spec.name, user, ttl):
             LOG.info(
                 "expired credential pool=%s user=%s...",
@@ -358,42 +284,46 @@ class HashGateHandler(socketserver.BaseRequestHandler):
                 user[:8],
             )
             return None
-        return node
+        return nodes
 
     def _handle_socks5(
         self, client: socket.socket, state: GateState, spec: PoolSpec
     ) -> None:
-        greet = _read_exact(client, 2)
+        greet = read_exact(client, 2, CONNECT_TIMEOUT_S)
         if len(greet) != 2 or greet[0] != 0x05:
             return
-        _read_exact(client, greet[1])
+        read_exact(client, greet[1], CONNECT_TIMEOUT_S)
         client.sendall(b"\x05\x02")
-        version = _read_exact(client, 1)
+        version = read_exact(client, 1, CONNECT_TIMEOUT_S)
         if version != b"\x01":
             return
-        user_length = _read_exact(client, 1)
-        user = _read_exact(client, user_length[0] if user_length else 0)
-        word_length = _read_exact(client, 1)
-        word = _read_exact(client, word_length[0] if word_length else 0)
+        user_length = read_exact(client, 1, CONNECT_TIMEOUT_S)
+        user = read_exact(
+            client, user_length[0] if user_length else 0, CONNECT_TIMEOUT_S
+        )
+        word_length = read_exact(client, 1, CONNECT_TIMEOUT_S)
+        word = read_exact(
+            client, word_length[0] if word_length else 0, CONNECT_TIMEOUT_S
+        )
         try:
             username = user.decode("utf-8")
             password = word.decode("utf-8")
         except UnicodeDecodeError:
             client.sendall(b"\x01\x01")
             return
-        node = self._authorize(state, spec, username, password)
-        if node is None:
+        nodes = self._authorize(state, spec, username, password)
+        if nodes is None:
             client.sendall(b"\x01\x01")
             return
         client.sendall(b"\x01\x00")
-        header = _read_exact(client, 4)
+        header = read_exact(client, 4, CONNECT_TIMEOUT_S)
         if len(header) != 4 or header[1] != 0x01:
             return
         host, port = self._read_target(client, header)
         if host is None or port is None:
             return
         try:
-            upstream = _connect_upstream(node, host, port)
+            upstream = _connect_pool(nodes, host, port, spec.name)
         except OSError as exc:
             LOG.info("upstream failed pool=%s: %s", spec.name, exc)
             client.sendall(b"\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00")
@@ -406,20 +336,20 @@ class HashGateHandler(socketserver.BaseRequestHandler):
     ) -> tuple[str | None, int | None]:
         kind = header[3]
         if kind == 0x01:
-            raw = _read_exact(client, 6)
+            raw = read_exact(client, 6, CONNECT_TIMEOUT_S)
             if len(raw) != 6:
                 return None, None
             return socket.inet_ntoa(raw[:4]), int.from_bytes(raw[4:], "big")
         if kind == 0x03:
-            length = _read_exact(client, 1)
+            length = read_exact(client, 1, CONNECT_TIMEOUT_S)
             if not length:
                 return None, None
-            raw = _read_exact(client, length[0] + 2)
+            raw = read_exact(client, length[0] + 2, CONNECT_TIMEOUT_S)
             if len(raw) != length[0] + 2:
                 return None, None
             return raw[:-2].decode("latin-1"), int.from_bytes(raw[-2:], "big")
         if kind == 0x04:
-            raw = _read_exact(client, 18)
+            raw = read_exact(client, 18, CONNECT_TIMEOUT_S)
             if len(raw) != 18:
                 return None, None
             return socket.inet_ntop(socket.AF_INET6, raw[:16]), int.from_bytes(
@@ -431,7 +361,7 @@ class HashGateHandler(socketserver.BaseRequestHandler):
         self, client: socket.socket, state: GateState, spec: PoolSpec
     ) -> None:
         try:
-            head = _read_http_head(client)
+            head = read_http_head(client, CONNECT_TIMEOUT_S)
         except OSError:
             return
         lines = head.split("\r\n")
@@ -455,15 +385,15 @@ class HashGateHandler(socketserver.BaseRequestHandler):
             )
             return
         username, password = credentials
-        node = self._authorize(state, spec, username, password)
-        if node is None:
+        nodes = self._authorize(state, spec, username, password)
+        if nodes is None:
             client.sendall(
                 b"HTTP/1.1 407 Proxy Authentication Required\r\n"
                 b"Content-Length: 0\r\n\r\n"
             )
             return
         try:
-            upstream = _connect_upstream(node, host, port)
+            upstream = _connect_pool(nodes, host, port, spec.name)
         except OSError as exc:
             LOG.info("upstream failed pool=%s: %s", spec.name, exc)
             client.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")

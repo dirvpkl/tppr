@@ -6,15 +6,26 @@ import threading
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import gate
+
+from common.upstream import connect_upstream, read_exact
 
 
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _closed_port() -> int:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = int(sock.getsockname()[1])
+    sock.close()
+    return port
 
 
 def _stub_socks5(stop: threading.Event) -> int:
@@ -37,18 +48,18 @@ def _stub_socks5(stop: threading.Event) -> int:
     def _echo_session(conn: socket.socket) -> None:
         with conn:
             try:
-                greet = gate._read_exact(conn, 2)
+                greet = read_exact(conn, 2, 5.0)
                 if len(greet) != 2:
                     return
-                gate._read_exact(conn, greet[1])
+                read_exact(conn, greet[1], 5.0)
                 conn.sendall(b"\x05\x00")
-                header = gate._read_exact(conn, 4)
+                header = read_exact(conn, 4, 5.0)
                 kind = header[3]
                 if kind == 0x01:
-                    gate._read_exact(conn, 6)
+                    read_exact(conn, 6, 5.0)
                 elif kind == 0x03:
-                    size = gate._read_exact(conn, 1)
-                    gate._read_exact(conn, (size[0] if size else 0) + 2)
+                    size = read_exact(conn, 1, 5.0)
+                    read_exact(conn, (size[0] if size else 0) + 2, 5.0)
                 else:
                     return
                 conn.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
@@ -57,6 +68,44 @@ def _stub_socks5(stop: threading.Event) -> int:
                     if not data:
                         return
                     conn.sendall(data)
+            except OSError:
+                return
+
+    threading.Thread(target=serve, daemon=True).start()
+    return port
+
+
+def _stub_silent_http(stop: threading.Event) -> int:
+    """Upstream that reads the CONNECT head and closes without answering.
+
+    This is the TCP-connectable-but-not-a-proxy shape the pool is full of: the
+    connection opens, the request goes out, and the peer hangs up without ever
+    sending a status line.
+    """
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    listener.settimeout(0.5)
+    port = int(listener.getsockname()[1])
+
+    def serve() -> None:
+        while not stop.is_set():
+            try:
+                conn, _ = listener.accept()
+            except socket.timeout:
+                continue
+            threading.Thread(target=_silent_session, args=(conn,), daemon=True).start()
+
+    def _silent_session(conn: socket.socket) -> None:
+        with conn:
+            data = b""
+            try:
+                while b"\r\n\r\n" not in data:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
             except OSError:
                 return
 
@@ -82,29 +131,161 @@ def _make_state(
 
 
 class ValidationTests(unittest.TestCase):
-    def test_user_must_be_hex(self) -> None:
+    def test_user_is_any_name(self) -> None:
+        self.assertTrue(gate._check_user("random"))
         self.assertTrue(gate._check_user("a1b2c3d4"))
         self.assertTrue(gate._check_user("ABCDEF1234567890" * 4))
-        self.assertFalse(gate._check_user("random"))
-        self.assertFalse(gate._check_user("short"))
-        self.assertFalse(gate._check_user("zz-top-88"))
+        self.assertFalse(gate._check_user(""))
+        self.assertFalse(gate._check_user("has space"))
+        self.assertFalse(gate._check_user("has:colon"))
+        self.assertFalse(gate._check_user("x" * 65))
 
     def test_ttl_bounds(self) -> None:
-        self.assertEqual(gate._check_ttl("15"), 15)
+        self.assertEqual(gate._check_ttl("5"), 5)
         self.assertEqual(gate._check_ttl("2592000"), 2592000)
-        self.assertIsNone(gate._check_ttl("14"))
+        self.assertIsNone(gate._check_ttl("4"))
         self.assertIsNone(gate._check_ttl("2592001"))
         self.assertIsNone(gate._check_ttl(""))
         self.assertIsNone(gate._check_ttl("4h"))
         self.assertIsNone(gate._check_ttl("-5"))
 
-    def test_pick_is_deterministic(self) -> None:
-        nodes: list[gate.YamlMapping] = [{"name": f"n{i}"} for i in range(10)]
-        first = gate._pick_node(nodes, "a1b2c3d4")
-        self.assertIs(gate._pick_node(nodes, "a1b2c3d4"), first)
-        self.assertIsNot(
-            gate._pick_node(nodes, "a1b2c3d4"), gate._pick_node(nodes, "ffffffff")
-        )
+    def test_fallback_skips_dead_node(self) -> None:
+        stop = threading.Event()
+        upstream = _stub_socks5(stop)
+        dead = _closed_port()
+        try:
+            with tempfile.TemporaryDirectory() as raw:
+                directory = Path(raw)
+                pool = (
+                    "proxies:\n"
+                    "  - name: dead\n"
+                    "    type: socks5\n"
+                    "    server: 127.0.0.1\n"
+                    f"    port: {dead}\n"
+                    "  - name: stub\n"
+                    "    type: socks5\n"
+                    "    server: 127.0.0.1\n"
+                    f"    port: {upstream}\n"
+                )
+                state, spec = _make_state(directory, pool, 20006)
+                gate_port = _serve_gate(state, spec)
+                try:
+                    for _ in range(3):
+                        sock = socket.create_connection(
+                            ("127.0.0.1", gate_port), timeout=5
+                        )
+                        with sock:
+                            sock.sendall(b"\x05\x01\x00")
+                            self.assertEqual(read_exact(sock, 2, 5.0), b"\x05\x02")
+                            user, word = b"fbcheck", b"3600"
+                            sock.sendall(
+                                b"\x01"
+                                + bytes([len(user)])
+                                + user
+                                + bytes([len(word)])
+                                + word
+                            )
+                            self.assertEqual(read_exact(sock, 2, 5.0), b"\x01\x00")
+                            sock.sendall(b"\x05\x01\x00\x03\x07example\x00\x50")
+                            reply = read_exact(sock, 10, 5.0)
+                            self.assertEqual(reply[1:2], b"\x00")
+                            sock.sendall(b"hello-fb")
+                            self.assertEqual(read_exact(sock, 8, 5.0), b"hello-fb")
+                finally:
+                    state.db.close()
+        finally:
+            stop.set()
+
+    def test_silent_http_node_is_treated_as_dead(self) -> None:
+        stop = threading.Event()
+        silent = _stub_silent_http(stop)
+        try:
+            node: gate.YamlMapping = {
+                "name": "silent",
+                "type": "http",
+                "server": "127.0.0.1",
+                "port": silent,
+            }
+            with self.assertRaises(OSError):
+                connect_upstream(node, "example.com", 80, 5.0)
+        finally:
+            stop.set()
+
+    def test_silent_http_node_falls_back(self) -> None:
+        stop = threading.Event()
+        upstream = _stub_socks5(stop)
+        silent = _stub_silent_http(stop)
+        try:
+            with tempfile.TemporaryDirectory() as raw:
+                directory = Path(raw)
+                pool = (
+                    "proxies:\n"
+                    "  - name: silent\n"
+                    "    type: http\n"
+                    "    server: 127.0.0.1\n"
+                    f"    port: {silent}\n"
+                    "  - name: stub\n"
+                    "    type: socks5\n"
+                    "    server: 127.0.0.1\n"
+                    f"    port: {upstream}\n"
+                )
+                state, spec = _make_state(directory, pool, 20006)
+                gate_port = _serve_gate(state, spec)
+                try:
+                    for _ in range(3):
+                        sock = socket.create_connection(
+                            ("127.0.0.1", gate_port), timeout=5
+                        )
+                        with sock:
+                            sock.sendall(b"\x05\x01\x00")
+                            self.assertEqual(read_exact(sock, 2, 5.0), b"\x05\x02")
+                            user, word = b"silentfb", b"3600"
+                            sock.sendall(
+                                b"\x01"
+                                + bytes([len(user)])
+                                + user
+                                + bytes([len(word)])
+                                + word
+                            )
+                            self.assertEqual(read_exact(sock, 2, 5.0), b"\x01\x00")
+                            sock.sendall(b"\x05\x01\x00\x03\x07example\x00\x50")
+                            reply = read_exact(sock, 10, 5.0)
+                            self.assertEqual(reply[1:2], b"\x00")
+                            sock.sendall(b"hello-fb")
+                            self.assertEqual(read_exact(sock, 8, 5.0), b"hello-fb")
+                finally:
+                    state.db.close()
+        finally:
+            stop.set()
+
+    def test_all_dead_reports_failure(self) -> None:
+        dead = _closed_port()
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            pool = (
+                "proxies:\n"
+                "  - name: dead\n"
+                "    type: socks5\n"
+                "    server: 127.0.0.1\n"
+                f"    port: {dead}\n"
+            )
+            state, spec = _make_state(directory, pool, 20006)
+            gate_port = _serve_gate(state, spec)
+            try:
+                sock = socket.create_connection(("127.0.0.1", gate_port), timeout=5)
+                with sock:
+                    sock.sendall(b"\x05\x01\x00")
+                    read_exact(sock, 2, 5.0)
+                    user, word = b"alldead", b"3600"
+                    sock.sendall(
+                        b"\x01" + bytes([len(user)]) + user + bytes([len(word)]) + word
+                    )
+                    self.assertEqual(read_exact(sock, 2, 5.0), b"\x01\x00")
+                    sock.sendall(b"\x05\x01\x00\x03\x07example\x00\x50")
+                    reply = read_exact(sock, 10, 5.0)
+                    self.assertEqual(reply[1:2], b"\x01")
+            finally:
+                state.db.close()
 
 
 class LeaseTests(unittest.TestCase):
@@ -142,20 +323,21 @@ class LeaseTests(unittest.TestCase):
                 state.db.close()
 
 
-class RoundTripTests(unittest.TestCase):
-    def _serve_gate(self, state: gate.GateState, spec: gate.PoolSpec) -> int:
-        server = gate.socketserver.ThreadingTCPServer(
-            ("127.0.0.1", 0), gate.HashGateHandler, bind_and_activate=False
-        )
-        server.allow_reuse_address = True
-        server.daemon_threads = True
-        server.state = state  # type: ignore[attr-defined]
-        server.spec = spec  # type: ignore[attr-defined]
-        server.server_bind()
-        server.server_activate()
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        return int(server.server_address[1])
+def _serve_gate(state: gate.GateState, spec: gate.PoolSpec) -> int:
+    server = gate.socketserver.ThreadingTCPServer(
+        ("127.0.0.1", 0), gate.HashGateHandler, bind_and_activate=False
+    )
+    server.allow_reuse_address = True
+    server.daemon_threads = True
+    server.state = state  # type: ignore[attr-defined]
+    server.spec = spec  # type: ignore[attr-defined]
+    server.server_bind()
+    server.server_activate()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return int(server.server_address[1])
 
+
+class RoundTripTests(unittest.TestCase):
     def test_socks5_echo(self) -> None:
         stop = threading.Event()
         upstream = _stub_socks5(stop)
@@ -170,12 +352,12 @@ class RoundTripTests(unittest.TestCase):
                     f"    port: {upstream}\n"
                 )
                 state, spec = _make_state(directory, pool, 20006)
-                gate_port = self._serve_gate(state, spec)
+                gate_port = _serve_gate(state, spec)
                 try:
                     sock = socket.create_connection(("127.0.0.1", gate_port), timeout=5)
                     with sock:
                         sock.sendall(b"\x05\x01\x00")
-                        self.assertEqual(gate._read_exact(sock, 2), b"\x05\x02")
+                        self.assertEqual(read_exact(sock, 2, 5.0), b"\x05\x02")
                         user, word = b"a1b2c3d4", b"3600"
                         sock.sendall(
                             b"\x01"
@@ -184,12 +366,12 @@ class RoundTripTests(unittest.TestCase):
                             + bytes([len(word)])
                             + word
                         )
-                        self.assertEqual(gate._read_exact(sock, 2), b"\x01\x00")
+                        self.assertEqual(read_exact(sock, 2, 5.0), b"\x01\x00")
                         sock.sendall(b"\x05\x01\x00\x03\x07example\x00\x50")
-                        reply = gate._read_exact(sock, 10)
+                        reply = read_exact(sock, 10, 5.0)
                         self.assertEqual(reply[1:2], b"\x00")
                         sock.sendall(b"hello-gate")
-                        self.assertEqual(gate._read_exact(sock, 10), b"hello-gate")
+                        self.assertEqual(read_exact(sock, 10, 5.0), b"hello-gate")
                 finally:
                     state.db.close()
         finally:
@@ -209,12 +391,12 @@ class RoundTripTests(unittest.TestCase):
                     f"    port: {upstream}\n"
                 )
                 state, spec = _make_state(directory, pool, 20006)
-                gate_port = self._serve_gate(state, spec)
+                gate_port = _serve_gate(state, spec)
                 try:
                     sock = socket.create_connection(("127.0.0.1", gate_port), timeout=5)
                     with sock:
                         sock.sendall(b"\x05\x01\x00")
-                        gate._read_exact(sock, 2)
+                        read_exact(sock, 2, 5.0)
                         user, word = b"deadbeef", b"15"
                         sock.sendall(
                             b"\x01"
@@ -242,7 +424,7 @@ class RoundTripTests(unittest.TestCase):
                             + bytes([len(word)])
                             + word
                         )
-                        self.assertEqual(gate._read_exact(retry, 2), b"\x01\x01")
+                        self.assertEqual(read_exact(retry, 2, 5.0), b"\x01\x01")
                 finally:
                     state.db.close()
         finally:
