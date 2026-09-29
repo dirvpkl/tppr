@@ -9,8 +9,8 @@ are gitignored: credentials never leave the machine.
 | Port | What | Auth |
 | --- | --- | --- |
 | 17890 | Everything: paid proxies plus the whole free pool, rule-routed | none |
-| 17891 | Free pool only | none |
-| 17892 | Paid proxies only (`mine.yaml`) | none |
+| 17891 | Free pool only (opt-in via `[global_pools]`, off by default) | none |
+| 17892 | Paid proxies only (opt-in via `[global_pools]`, off by default) | none |
 | 17893 | Dispatcher: one account per login, each routed to its own group | login + password |
 | 17894 | Hash gate, all pools: username picks the node, password is the TTL | hash + TTL |
 | 17895 | Hash gate, free pool only | hash + TTL |

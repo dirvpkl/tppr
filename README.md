@@ -166,3 +166,4 @@ git push -u origin master
 - `scripts/README.md` — what each script does and every error it can raise.
 - `scripts/smoke.ps1` — config + syntax sanity checks.
 - `scripts/reload.ps1` — regenerate, wait for the pool worker, validate with Mihomo, then recreate the relay and tester.
+- `AGENTS.md` — contributor onboarding: architecture, workflows, verification commands, and verified Mihomo behaviors.
