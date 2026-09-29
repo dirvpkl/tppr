@@ -11,6 +11,16 @@ max_workers = 4
 listen = "0.0.0.0"
 port = 8080
 
+# Liveness probing. Every merged node that speaks HTTP/SOCKS5 must complete a
+# tunnel to url, or it never reaches a pool file. Other protocols pass through
+# unchecked. Omit this section to disable probing entirely.
+# url stays a plain target for now; method/headers/body/expected_status arrive
+# later without breaking this shape.
+[check]
+url = "https://www.gstatic.com/generate_204"
+timeout_s = 5
+workers = 150
+
 [[sources]]
 name = "radikal-verified"
 url = "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs_base64.txt"

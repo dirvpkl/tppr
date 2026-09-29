@@ -9,7 +9,7 @@ proxies and accounts), `scripts/README.md` (scripts and their errors).
 
 A Windows-hosted personal proxy stack. Docker Compose runs Mihomo (Clash.Meta)
 as the core, fed by a self-built free-proxy aggregator, private paid proxies,
-per-account authentication, and a hash-routed gateway with expiring
+per-account authentication, and a random-exit gateway with expiring
 credentials. Everything is localhost- or LAN-bound; there is no public surface.
 
 ## Service topology (compose project `proxy-pool`)
@@ -19,7 +19,8 @@ credentials. Everything is localhost- or LAN-bound; there is no public surface.
 | `proxy-pool-mihomo-relay` | core proxy, auth, routing | `0.0.0.0:17893` dispatcher, `0.0.0.0:20001-20005` services, `127.0.0.1:19090` controller |
 | `proxy-pool-subconv` | subscription format normalizer (profile `pool-aggregation`) | none (internal `:8080`) |
 | `proxy-pool-pool-worker` | pool builder (profile `pool-aggregation`) | internal `:8080` |
-| `proxy-pool-hash-gate` | hash/TTL gateway (profile `pool-aggregation`) | `0.0.0.0:17894` all, `:17895` free, `:17896` custom |
+| `proxy-pool-hash-gate` | random-exit/TTL gateway (profile `pool-aggregation`) | `0.0.0.0:17894` all (free/custom gateways internal-only) |
+| `proxy-pool-api` | management REST API (always on) | `127.0.0.1:18080`, Bearer token |
 | `proxy-pool-speed-tester` | throughput sweeps, manages `POOL` selection | none |
 
 `pool-aggregation` profile is auto-enabled by `reload.ps1` when
@@ -30,8 +31,14 @@ it must stay on `127.0.0.1` or anyone on the LAN gets full control.
 
 - `17893` — dispatcher (mixed HTTP/SOCKS5): one login per account, `IN-USER`
   routes each login to its own group.
-- `17894/17895/17896` — hash gate: username is a hex hash pinning the exit
-  node, password is TTL seconds (15–2592000) counted from the first request.
+- Management API on `127.0.0.1:18080` (Bearer token): `GET /status`,
+  `GET|POST /accounts`, `DELETE /accounts/{name}`, `GET|DELETE /leases`.
+  Mutations validate before write and report `reload_required`; only
+  `reload.ps1` recreates containers. Passwords are returned once, by create.
+- `17894` — gateway: every connection exits through a uniformly
+  random pool node (up to 5 random retries across distinct nodes when the pick
+  is dead); username is any name, password is TTL seconds (5–2592000)
+  counted from the first request.
 - `20001–20004` — fixed per-service ports (pool groups, no auth).
 - `20005` — fixed port, `round-robin` rotation over the free pool.
 - `17890` — unpublished (container still listens on `:7890`, unreachable from
@@ -49,7 +56,8 @@ mihomo/providers/mine.yaml (paid proxies) ────┴─▶ inlined into gen
 ```
 
 - Worker: parallel fetch (`max_workers`), canonical-fingerprint dedupe,
-  deterministic pool assignment, `max_nodes: 1000`, refresh every 300 s.
+  deterministic pool assignment, `max_nodes: 1000`, refresh every 300 s,
+  liveness probing of HTTP/SOCKS5 nodes via `[check]` before bucketing.
 - Worker drops nodes Mihomo cannot parse (ss cipher allowlist incl. the
   `2022-blake3` base64 rule, UUID check for vmess/vless, server/port sanity).
   Count is visible as `dropped_nodes` in `/healthz`.
@@ -161,14 +169,21 @@ pool contents — in that order.
 - Never read container logs without being asked; the controller API and
   `/healthz` are the observability path. Never `docker compose logs -f` into
   a report.
-- Temp work goes to `C:\Users\user\AppData\Local\Temp\opencode`, never into
-  the repo. Clean up probe containers/files when done.
+- Temp work goes to the platform temp dir, never into the repo. Clean up probe
+  containers/files when done.
 
 ## Known limitations / next
 
 - No proxy-level liveness gate: pool nodes are validated for parseability, not
   dialed. A handshake-probing filter in the worker would fix pool quality
   properly.
+- Hash gate reaches only HTTP/SOCKS5 upstreams (~65% of a pool). Planned, not
+  built: Trojan + VLESS forwarding in `hash-gate/gate.py` (stdlib TLS and
+  framing, lifts coverage to ~90%), then VMess + Shadowsocks (needs an AEAD
+  package, ~98%). Reality/XTLS-vision and Hysteria2 are out of scope.
 - No Telegram management bot yet (decided: aiogram 3.x when built).
+- Scale-out idea (not built): one gateway port instead of N, pool chosen by
+  username prefix (`free:<name>`, `batch2:<name>`). Separate paid batches
+  become pool files, not new ports.
 - `mihomo -t` without `-f` validates an auto-created EMPTY config — always
   pass `-f /etc/mihomo/generated/config.yaml` (same in scripts).

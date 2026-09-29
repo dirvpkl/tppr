@@ -8,14 +8,8 @@ are gitignored: credentials never leave the machine.
 
 | Port | What | Auth |
 | --- | --- | --- |
-| 17890 | Everything: paid proxies plus the whole free pool, rule-routed | none |
-| 17891 | Free pool only (opt-in via `[global_pools]`, off by default) | none |
-| 17892 | Paid proxies only (opt-in via `[global_pools]`, off by default) | none |
 | 17893 | Dispatcher: one account per login, each routed to its own group | login + password |
-| 17894 | Hash gate, all pools: username picks the node, password is the TTL | hash + TTL |
-| 17895 | Hash gate, free pool only | hash + TTL |
-| 17896 | Hash gate, paid proxies only | hash + TTL |
-| 20001+ | Fixed per-service ports, one group each | none |
+| 17894 | Hash gate, all pools: random node per connection, password is the TTL | any name + TTL |
 
 The controller API (`HOST_CONTROLLER_PORT`, localhost only) has no password:
 keep it off the LAN.
@@ -40,6 +34,7 @@ accounts. No group editing is needed. Then apply:
 
 ```sh
 ./scripts/reload.ps1
+curl --proxy http://127.0.0.1:20005 https://www.gstatic.com/generate_204 -o /dev/null -w "%{http_code}\n"
 ```
 
 ## Create an account
@@ -114,25 +109,24 @@ socks5://username:password@host:17893
 http://username:password@host:17893
 ```
 
-## Expiring hash access (ports 17894–17896)
+## Expiring random access (port 17894)
 
-No account needed. The username is a hex hash that deterministically picks the
-exit node; the password is a TTL in seconds (15 to 2592000). The countdown
-starts at the first request:
+No account needed. Every connection exits through a random pool node. The
+username is any name, the password is a TTL in seconds (5 to 2592000).
+The countdown starts at the first request:
 
 ```sh
-python -c "import secrets;print(secrets.token_hex(8))"
-curl --proxy socks5h://<hash>:3600@host:17894 https://api.ipify.org
+curl --proxy socks5h://random:60@host:17894 https://api.ipify.org
 ```
 
-Same hash, same exit node (until the pool file refreshes). After the TTL the
-credential is rejected. Only HTTP and SOCKS5 upstreams are reachable this way.
+After the TTL the credential is rejected. Only HTTP and SOCKS5 upstreams are
+reachable this way.
 
 ## Apply and verify
 
 ```sh
 ./scripts/reload.ps1
-curl --proxy http://127.0.0.1:17890 https://www.gstatic.com/generate_204 -o /dev/null -w "%{http_code}\n"
+curl --proxy http://127.0.0.1:20005 https://www.gstatic.com/generate_204 -o /dev/null -w "%{http_code}\n"
 ```
 
 The generator fails loudly on typos (unknown `primary`, duplicate ports,

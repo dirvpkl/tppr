@@ -96,20 +96,41 @@ lock_proxy = true         # only if it must never fall back to a free node
 Compose config check, Python syntax check and the unit tests. It does not touch
 running containers.
 
+## Management API (`api/`, port 18080)
+
+Localhost only, every endpoint needs `Authorization: Bearer $API_TOKEN`
+(`API_TOKEN` in `.env`). For agents: manage accounts, inspect pools and revoke
+hash-gate leases without touching TOML or running scripts.
+
+| Call | Meaning |
+| --- | --- |
+| `GET /` | endpoint index |
+| `GET /status` | service counts, pool node counts, lease counts, `config_stale` |
+| `GET /accounts` | every account, passwords never included |
+| `POST /accounts` | create; body mirrors `[[services]]` fields, `password` generated when omitted and returned **once** |
+| `DELETE /accounts/{name}` | revoke; 404 when missing |
+| `GET /leases[?pool=]` | hash-gate leases with live `expired`/`expires_in_s` |
+| `DELETE /leases/{pool}/{user}` | revoke instantly, no reload needed |
+
+Mutations validate before write (same rules as `generate.py`: 400 bad input,
+409 duplicate) and answer `reload_required: true` — recreating containers stays
+in `reload.ps1`, the API never touches Docker. Passwords are returned only by
+`POST /accounts`, never by `GET`.
+
 ## Hash gate ports
 
-`proxy-pool-hash-gate` serves three ports that need no Mihomo groups at all:
-`HASH_GATE_ALL_PORT` (default 17894, every pool file plus the custom proxies),
-`HASH_GATE_FREE_PORT` (default 17895, worker pools only) and
-`HASH_GATE_CUSTOM_PORT` (default 17896, custom proxies only).
+`proxy-pool-hash-gate` serves the all-pools mix on `HASH_GATE_ALL_PORT`
+(default 17894). The free-only and custom-only gateways
+(`HASH_GATE_FREE_PORT`, `HASH_GATE_CUSTOM_PORT`) listen inside the compose
+network; publish them to enable.
 
-Connect with a hex username and a TTL-seconds password:
+Connect with any username and a TTL-seconds password:
 
 ```powershell
-curl.exe --proxy socks5h://a1b2c3d4e5f60718:3600@host.docker.internal:17895 https://api.ipify.org
+curl.exe --proxy socks5h://random:60@host.docker.internal:17894 https://api.ipify.org
 ```
 
-The same username always exits through the same node while the pool file is
-unchanged. After the TTL elapses from the first request the credential is
-rejected. Only HTTP and SOCKS5 upstreams are forwardable; a pool with none of
-those rejects every connection. Leases live in the `hash-gate-data` volume.
+Every connection exits through a random pool node. After the TTL elapses from
+the first request the credential is rejected. Only HTTP and SOCKS5 upstreams
+are forwardable; a pool with none of those rejects every connection. Leases
+live in the `hash-gate-data` volume.

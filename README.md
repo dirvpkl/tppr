@@ -1,4 +1,4 @@
-# proxy-pool 0.10.0 — a global pool, LAN-reachable proxy ports, an optional dispatcher, pinned accounts, and local pool aggregation.
+# proxy-pool 0.12.0 — a global pool, LAN-reachable proxy ports, an optional dispatcher, pinned accounts, and local pool aggregation.
 
 ## What it does
 - `proxy-pool-mihomo-relay` exposes HTTP/SOCKS inside Docker and publishes the
@@ -57,6 +57,7 @@
 - The worker calls SubConv's `/provider` endpoint, accepts Clash/URI/base64 output, removes cross-source duplicates by canonical node fingerprint, and writes deterministic pool files such as `mihomo/providers/pool-free-pool.yaml`.
 - Sources are fetched in parallel (`worker.max_workers`). A dead source is reported as `degraded` in `/healthz` and skipped instead of taking the other pools down; the last good pool snapshot is kept when every source fails.
 - The worker also drops nodes Mihomo cannot parse. Mihomo empties an entire `proxy-provider` when a single node fails to initialize, so one free node with an unsupported shadowsocks cipher or a malformed key would otherwise take the whole pool down. The count is reported as `dropped_nodes` in `/healthz`.
+- The worker then probes every remaining HTTP/SOCKS5 node: only nodes that complete a tunnel to the `[check]` target reach a pool file (`checked_nodes`/`dead_nodes` in `/healthz`). Other protocols pass through unchecked for now.
 - `max_nodes` caps a pool at 1000 nodes; raise `MAX_NODES` in `pool-worker/worker.py` to go higher.
 - Reference pool names from `services.toml` with `subscriptions = ["free-pool"]`. A source may appear in several pools; a node is assigned to one pool by stable hash unless the pool is marked `shared = true`.
 - Pools use Mihomo fallback failover. Per-pool throughput rotation is not enabled; the existing speed tester manages only the global `POOL`.
@@ -90,17 +91,16 @@
 - `balance = "round-robin"` turns the group into a load-balance pool: every new connection exits through the next node instead of sticking to one. It needs `subscriptions` and forbids `primary`, `fallback` and `lock_proxy`. The effective variety equals the currently healthy nodes, so a free pool rotates between its survivors.
 
 ## Hash-routed expiring access
-- Three extra ports serve one pool each without touching Mihomo: `17894` reads
-  every pool file plus the custom proxies, `17895` reads the worker pools only,
-  `17896` reads the custom proxies only. Override them with `HASH_GATE_*_PORT`.
-- Authentication is also routing and expiry. The username is a hex hash that
-  picks the exit node (`int(hash, 16) % nodes`); the password is a TTL in
-  seconds, from 15 up to 30 days. The countdown starts at the first request and
-  is stored in SQLite, so restarts do not extend it. An expired credential is
-  rejected like a wrong password.
-- Generate a username with `python -c "import secrets;print(secrets.token_hex(8))"`.
-  The same hash always exits through the same node while the pool file is
-  unchanged; pool refreshes may shift the mapping.
+- Port `17894` serves the all-pools mix without touching Mihomo (override with
+  `HASH_GATE_ALL_PORT`). The free-only and custom-only gateways keep listening
+  inside the compose network; publish `17895`/`17896` to enable them.
+- Every connection exits through a uniformly random pool node. Authentication
+  only gates lifetime: the username is any name (`random` works), the password
+  is a TTL in seconds, from 5 up to 30 days. The countdown starts at the first
+  request and is stored in SQLite, so restarts do not extend it. An expired
+  credential is rejected like a wrong password.
+- A dead pick never fails the client outright: the gateway retries against up
+  to 5 other random nodes of the same pool before giving up.
 - Only HTTP and SOCKS5 upstreams are forwardable, so roughly two thirds of a
   pool are reachable through these ports. The rest needs the Mihomo groups.
 - `reload.ps1` starts the gate with the pool profile and waits for it to report
@@ -164,6 +164,7 @@ git push -u origin master
 - `speed-tester/tester.py` — throughput sweeps (stdlib only, structured logs).
 - `speed-tester/history.py` — SQLite sweep history and cooldown tracking.
 - `scripts/README.md` — what each script does and every error it can raise.
+- `api/` — management REST API on `127.0.0.1:18080` (Bearer token): accounts CRUD, status, hash-lease revocation.
 - `scripts/smoke.ps1` — config + syntax sanity checks.
 - `scripts/reload.ps1` — regenerate, wait for the pool worker, validate with Mihomo, then recreate the relay and tester.
 - `AGENTS.md` — contributor onboarding: architecture, workflows, verification commands, and verified Mihomo behaviors.
