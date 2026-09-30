@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 from history import History
 
-SERVICE_NAME = "proxy-pool-speed-tester"
+SERVICE_NAME = "tppr-speed-tester"
 SKIP_NODES = frozenset({"DIRECT", "REJECT", "PASS", "COMPATIBLE"})
 CHUNK_BYTES = 65536
 MAX_PROBE_BATCH_SIZE = 100

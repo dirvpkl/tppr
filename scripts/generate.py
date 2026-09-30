@@ -734,7 +734,7 @@ def render_compose_override(
     ports.extend(service.port for service in services if service.port is not None)
     if not ports:
         return "services: {}\n"
-    lines = ["services:", "  proxy-pool-mihomo-relay:", "    ports:"]
+    lines = ["services:", "  tppr-mihomo-relay:", "    ports:"]
     lines.extend(f'      - "0.0.0.0:{port}:{port}"' for port in ports)
     return "\n".join(lines) + "\n"
 

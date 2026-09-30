@@ -35,7 +35,7 @@ sys.path.insert(0, "/scripts")
 import generate  # noqa: E402
 from new_accounts import random_password  # noqa: E402
 
-SERVICE_NAME = "proxy-pool-api"
+SERVICE_NAME = "tppr-api"
 MAX_BODY = 65536
 WORKER_TIMEOUT_S = 5
 DB_TIMEOUT_S = 5
@@ -75,9 +75,9 @@ def _load_config() -> AppConfig:
         generated_path=Path(
             os.environ.get("GENERATED_PATH", "/mihomo/generated/config.yaml")
         ),
-        worker_url=os.environ.get(
-            "WORKER_URL", "http://proxy-pool-pool-worker:8080"
-        ).rstrip("/"),
+        worker_url=os.environ.get("WORKER_URL", "http://tppr-pool-worker:8080").rstrip(
+            "/"
+        ),
         hash_db_path=Path(os.environ.get("HASH_DB", "/hashdata/hashes.db")),
         listen=os.environ.get("LISTEN", "0.0.0.0"),
         port=int(os.environ.get("PORT", "8080")),
@@ -414,7 +414,7 @@ def handle_delete_lease(
 
 class ApiHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "proxy-pool-api"
+    server_version = "tppr-api"
 
     def _respond(self, status: int, payload: dict[str, object]) -> None:
         body = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")

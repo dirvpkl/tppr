@@ -1,4 +1,4 @@
-# AGENTS.md — proxy-pool contributor guide
+# AGENTS.md — tppr contributor guide
 
 Read this before touching anything. It condenses several days of verified
 behavior; every non-obvious claim below was proven with a live test, not
@@ -12,16 +12,16 @@ as the core, fed by a self-built free-proxy aggregator, private paid proxies,
 per-account authentication, and a random-exit gateway with expiring
 credentials. Everything is localhost- or LAN-bound; there is no public surface.
 
-## Service topology (compose project `proxy-pool`)
+## Service topology (compose project `tppr`)
 
 | Container | Role | Ports (host → container) |
 | --- | --- | --- |
-| `proxy-pool-mihomo-relay` | core proxy, auth, routing | `0.0.0.0:17893` dispatcher, `0.0.0.0:20001-20005` services, `127.0.0.1:19090` controller |
-| `proxy-pool-subconv` | subscription format normalizer (profile `pool-aggregation`) | none (internal `:8080`) |
-| `proxy-pool-pool-worker` | pool builder (profile `pool-aggregation`) | internal `:8080` |
-| `proxy-pool-hash-gate` | random-exit/TTL gateway (profile `pool-aggregation`) | `0.0.0.0:17894` all (free/custom gateways internal-only) |
-| `proxy-pool-api` | management REST API (always on) | `127.0.0.1:18080`, Bearer token |
-| `proxy-pool-speed-tester` | throughput sweeps, manages `POOL` selection | none |
+| `tppr-mihomo-relay` | core proxy, auth, routing | `0.0.0.0:17893` dispatcher, `0.0.0.0:20001-20005` services, `127.0.0.1:19090` controller |
+| `tppr-subconv` | subscription format normalizer (profile `pool-aggregation`) | none (internal `:8080`) |
+| `tppr-pool-worker` | pool builder (profile `pool-aggregation`) | internal `:8080` |
+| `tppr-hash-gate` | random-exit/TTL gateway (profile `pool-aggregation`) | `0.0.0.0:17894` all (free/custom gateways internal-only) |
+| `tppr-api` | management REST API (always on) | `127.0.0.1:18080`, Bearer token |
+| `tppr-speed-tester` | throughput sweeps, manages `POOL` selection | none |
 
 `pool-aggregation` profile is auto-enabled by `reload.ps1` when
 `pool-sources.toml` exists. The controller (`19090`) has an **empty secret**:
@@ -100,13 +100,13 @@ the sole writer of the active config; never hand-edit `mihomo/generated/`.
 
 ```powershell
 python scripts/generate.py                                    # 14+ services, must print no error
-docker compose run --rm --no-deps --entrypoint /mihomo proxy-pool-mihomo-relay -t -d /etc/mihomo -f /etc/mihomo/generated/config.yaml
+docker compose run --rm --no-deps --entrypoint /mihomo tppr-mihomo-relay -t -d /etc/mihomo -f /etc/mihomo/generated/config.yaml
 curl.exe -s -o NUL -m 25 --proxy socks5h://user:pass@host.docker.internal:17893 -w "%{http_code}" https://www.gstatic.com/generate_204   # want 204
 curl.exe -s -m 25 --proxy socks5h://user:pass@host.docker.internal:17893 https://api.ipify.org   # exit IP
 Invoke-RestMethod http://127.0.0.1:19090/providers/proxies    # per-provider node counts
 Invoke-RestMethod http://127.0.0.1:19090/proxies/SVC_<name>   # .now + .all (group order!)
 Invoke-RestMethod "http://127.0.0.1:19090/proxies/<node>/delay?timeout=8000&url=https://www.gstatic.com/generate_204"  # single-node probe
-docker exec proxy-pool-pool-worker python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8080/healthz').read().decode())"
+docker exec tppr-pool-worker python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8080/healthz').read().decode())"
 ```
 
 `000` from curl usually means the group's current node just died; retry twice

@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Stop"
-# Sanity checks for proxy-pool. Run from the repo root.
+# Sanity checks for tppr. Run from the repo root.
 if (-not (Test-Path -LiteralPath ".\docker-compose.yml")) { throw "run from the repo root" }
 if (-not (Test-Path -LiteralPath ".\.env")) { throw "missing .env (copy from .env.example)" }
 if (-not (Test-Path -LiteralPath ".\services.toml")) { Copy-Item -LiteralPath ".\services.example.toml" -Destination ".\services.toml" }

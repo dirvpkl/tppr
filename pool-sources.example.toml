@@ -1,6 +1,6 @@
 [worker]
-subconv_url = "http://proxy-pool-subconv:8080"
-endpoint = "http://proxy-pool-pool-worker:8080"
+subconv_url = "http://tppr-subconv:8080"
+endpoint = "http://tppr-pool-worker:8080"
 output_dir = "/providers"
 refresh_interval_s = 900
 request_timeout_s = 30

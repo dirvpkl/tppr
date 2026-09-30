@@ -40,7 +40,7 @@ import yaml  # type: ignore[import-untyped]
 
 from common.upstream import connect_upstream, read_exact, read_http_head
 
-SERVICE_NAME = "proxy-pool-hash-gate"
+SERVICE_NAME = "tppr-hash-gate"
 USER_RE = re.compile(r"[A-Za-z0-9_.\-]{1,64}\Z")
 TTL_RE = re.compile(r"[0-9]{1,10}\Z")
 MIN_TTL_S = 5

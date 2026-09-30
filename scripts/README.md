@@ -14,7 +14,7 @@ What it does, in order:
 2. runs `generate.py` (fails loudly on any config error);
 3. validates the Compose file;
 4. if `pool-sources.toml` exists, starts the `pool-aggregation` profile and waits
-   for `proxy-pool-pool-worker` to report `healthy` — pool files are served over
+   for `tppr-pool-worker` to report `healthy` — pool files are served over
    the internal Docker network, so Mihomo needs them before it starts;
 5. validates the generated config with `mihomo -t`;
 6. recreates only the relay and the speed tester, leaving the healthy pool
@@ -119,7 +119,7 @@ in `reload.ps1`, the API never touches Docker. Passwords are returned only by
 
 ## Hash gate ports
 
-`proxy-pool-hash-gate` serves the all-pools mix on `HASH_GATE_ALL_PORT`
+`tppr-hash-gate` serves the all-pools mix on `HASH_GATE_ALL_PORT`
 (default 17894). The free-only and custom-only gateways
 (`HASH_GATE_FREE_PORT`, `HASH_GATE_CUSTOM_PORT`) listen inside the compose
 network; publish them to enable.

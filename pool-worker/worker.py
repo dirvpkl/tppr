@@ -25,7 +25,7 @@ import yaml  # type: ignore[import-untyped]
 
 from common import probe
 
-SERVICE_NAME = "proxy-pool-pool-worker"
+SERVICE_NAME = "tppr-pool-worker"
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}\Z")
 MAX_SOURCES = 100
 MAX_POOLS = 100
@@ -422,7 +422,7 @@ def _is_usable(proxy: YamlMapping) -> bool:
 def _fetch_source(source: Source, config: WorkerConfig) -> list[YamlMapping]:
     query = urlencode({"url": source.url})
     url = f"{config.subconv_url}/provider?{query}"
-    request = Request(url, headers={"User-Agent": "proxy-pool-pool-worker"})
+    request = Request(url, headers={"User-Agent": "tppr-pool-worker"})
     attempts = config.max_attempts
     for attempt in range(1, attempts + 1):
         try:

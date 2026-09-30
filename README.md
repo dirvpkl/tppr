@@ -1,9 +1,9 @@
-# proxy-pool 0.12.0 — a global pool, LAN-reachable proxy ports, an optional dispatcher, pinned accounts, and local pool aggregation.
+# tppr 0.12.0 — a global pool, LAN-reachable proxy ports, an optional dispatcher, pinned accounts, and local pool aggregation.
 
 > Vibe-coded side project, built to demo a fun idea: a self-hosted proxy router.
 
 ## What it does
-- `proxy-pool-mihomo-relay` exposes HTTP/SOCKS inside Docker and publishes the
+- `tppr-mihomo-relay` exposes HTTP/SOCKS inside Docker and publishes the
   proxy ports on all host interfaces (`HOST_MIXED_PORT`, 17890 in the checked-in
   example). The controller stays on `127.0.0.1` only. The
   `POOL` selector is the production route; the separate `TEST_POOL` selector
@@ -13,7 +13,7 @@
   failure, candidates are latency-probed in batches of 100 with 100 workers;
   failover stops after 1 good candidate; a scheduled sweep collects up to 5
   good candidates and benchmarks at most 5 total nodes including production.
-- Slow loop (`proxy-pool-speed-tester`, default every 300s): downloads a test
+- Slow loop (`tppr-speed-tester`, default every 300s): downloads a test
   file through up to 5 total nodes (the current production node plus up to 4
   discovered candidates), measures throughput, then updates only `POOL` to the
   fastest healthy node. Results persist in SQLite (`tester-data` volume): nodes
@@ -142,13 +142,13 @@ Invoke-RestMethod http://127.0.0.1:9090/proxies/POOL | Select-Object -ExpandProp
 # pin a node
 Invoke-RestMethod -Method Put http://127.0.0.1:9090/proxies/POOL -Body '{"name":"node-17"}' -ContentType 'application/json'
 # pool worker health, including per-source node counts and dropped nodes
-docker exec proxy-pool-pool-worker python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8080/healthz').read().decode())"
+docker exec tppr-pool-worker python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8080/healthz').read().decode())"
 ```
 Controller and mixed ports in those examples are container ports; on the host use the values of `HOST_CONTROLLER_PORT` and `HOST_MIXED_PORT` from `.env`.
 
 ## Publishing to GitHub
 ```powershell
-git remote add origin https://github.com/<you>/proxy-pool.git
+git remote add origin https://github.com/<you>/tppr.git
 git push -u origin master
 ```
 `.env`, `services.toml`, `pool-sources.toml`, `mihomo/providers/mine.yaml`, and `mihomo/generated/` are gitignored — secrets never leave the machine.
