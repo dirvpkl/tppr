@@ -4,12 +4,43 @@ import sys
 import tempfile
 import threading
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import worker
+
+from common import probe
+
+
+def _read_head(conn: socket.socket) -> bytes:
+    head = b""
+    conn.settimeout(5.0)
+    while b"\r\n\r\n" not in head:
+        chunk = conn.recv(4096)
+        if not chunk:
+            break
+        head += chunk
+    return head
+
+
+def _check_settings(
+    raw: Mapping[str, object] | None = None,
+    timeout_s: int = 5,
+    workers: int = 4,
+) -> worker.CheckSettings:
+    table: worker.TomlTable = {"url": "https://example.com/health"}
+    if raw is not None:
+        table.update(raw)
+    return worker.CheckSettings(
+        True,
+        probe.parse_probe_spec(table),
+        probe.parse_expect_spec(None),
+        timeout_s,
+        workers,
+    )
 
 
 class WorkerTests(unittest.TestCase):
@@ -22,7 +53,7 @@ class WorkerTests(unittest.TestCase):
             retry_backoff_s=5,
             max_attempts=3,
             max_workers=2,
-            check=worker.CheckSettings(False, "", 0, 8, 10),
+            check=worker.CheckSettings(False, None, probe.ExpectSpec(), 8, 10),
             sources=(
                 worker.Source("one", "https://example.com/one"),
                 worker.Source("two", "https://example.com/two"),
@@ -91,7 +122,7 @@ class WorkerTests(unittest.TestCase):
             retry_backoff_s=5,
             max_attempts=3,
             max_workers=2,
-            check=worker.CheckSettings(False, "", 0, 8, 10),
+            check=worker.CheckSettings(False, None, probe.ExpectSpec(), 8, 10),
             sources=(worker.Source("one", "https://example.com/one"),),
             pools=(
                 worker.Pool("alpha", ("one",), 10, True),
@@ -271,7 +302,13 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(config.check.enabled)
         self.assertEqual(
             config.check,
-            worker.CheckSettings(True, "example.com", 443, 5, 10),
+            worker.CheckSettings(
+                True,
+                probe.parse_probe_spec({"url": "https://example.com/health"}),
+                probe.parse_expect_spec(None),
+                5,
+                10,
+            ),
         )
 
     def test_check_config_rejects_bad_url(self) -> None:
@@ -313,13 +350,14 @@ class WorkerTests(unittest.TestCase):
         def handle(conn: socket.socket) -> None:
             with conn:
                 try:
-                    head = b""
                     conn.settimeout(5.0)
-                    while b"\r\n\r\n" not in head:
-                        chunk = conn.recv(4096)
-                        if not chunk:
-                            return
-                        head += chunk
+                    connect = _read_head(conn)
+                    if not connect.startswith(b"CONNECT "):
+                        return
+                    conn.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    inner = _read_head(conn)
+                    if not inner.startswith(b"GET "):
+                        return
                     conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                 except OSError:
                     return
@@ -329,7 +367,11 @@ class WorkerTests(unittest.TestCase):
         try:
             config = dataclasses.replace(
                 self.config(),
-                check=worker.CheckSettings(True, "example.com", 443, 5, 4),
+                check=_check_settings(
+                    {"url": f"http://127.0.0.1:{upstream}/health"},
+                    timeout_s=5,
+                    workers=4,
+                ),
             )
             live_proxy: worker.YamlMapping = {
                 "name": "live",
@@ -363,6 +405,110 @@ class WorkerTests(unittest.TestCase):
         finally:
             stop.set()
             listener.close()
+
+    def test_check_all_enforces_expect_status(self) -> None:
+        stop = threading.Event()
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        listener.settimeout(0.5)
+        upstream = int(listener.getsockname()[1])
+
+        def serve() -> None:
+            while not stop.is_set():
+                try:
+                    conn, _ = listener.accept()
+                except OSError:
+                    continue
+                threading.Thread(target=handle, args=(conn,), daemon=True).start()
+
+        def handle(conn: socket.socket) -> None:
+            with conn:
+                try:
+                    conn.settimeout(5.0)
+                    if not _read_head(conn).startswith(b"CONNECT "):
+                        return
+                    conn.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    if not _read_head(conn).startswith(b"GET "):
+                        return
+                    conn.sendall(b"HTTP/1.1 500 Broken\r\nContent-Length: 0\r\n\r\n")
+                except OSError:
+                    return
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            target = f"http://127.0.0.1:{upstream}/health"
+            node_proxy: worker.YamlMapping = {
+                "name": "flaky",
+                "type": "http",
+                "server": "127.0.0.1",
+                "port": upstream,
+            }
+            fingerprint = worker._fingerprint(node_proxy)
+            nodes = {fingerprint: worker.Node(dict(node_proxy), fingerprint, {"one"})}
+            lax = dataclasses.replace(
+                self.config(),
+                check=worker.CheckSettings(
+                    True,
+                    probe.parse_probe_spec({"url": target}),
+                    probe.parse_expect_spec(None),
+                    5,
+                    4,
+                ),
+            )
+            live, _, dead = worker._check_all(lax, dict(nodes))
+            self.assertEqual(dead, 0)
+            self.assertEqual(len(live), 1)
+            strict = dataclasses.replace(
+                self.config(),
+                check=worker.CheckSettings(
+                    True,
+                    probe.parse_probe_spec({"url": target}),
+                    probe.parse_expect_spec({"status": [200]}),
+                    5,
+                    4,
+                ),
+            )
+            live, _, dead = worker._check_all(strict, dict(nodes))
+            self.assertEqual(dead, 1)
+            self.assertEqual(len(live), 0)
+        finally:
+            stop.set()
+            listener.close()
+
+    def test_check_config_rejects_bad_probe(self) -> None:
+        for check in (
+            {"url": "https://example.com/health", "method": "get"},
+            {"url": "https://example.com/health", "method": "GE T"},
+            {"url": "https://example.com/health", "headers": ["X-A"]},
+            {"url": "https://example.com/health", "body": 5},
+            {"url": "https://example.com/health", "expect": {"status": [99]}},
+            {
+                "url": "https://example.com/health",
+                "expect": {"body": {"regex": "(broken"}},
+            },
+        ):
+            document: worker.TomlTable = {
+                "worker": {
+                    "subconv_url": "http://subconv:8080",
+                    "output_dir": "providers",
+                    "refresh_interval_s": 900,
+                    "request_timeout_s": 30,
+                    "retry_backoff_s": 5,
+                    "max_attempts": 3,
+                    "listen": "0.0.0.0",
+                    "port": 8080,
+                },
+                "sources": [{"name": "s", "url": "https://example.com/s"}],
+                "pools": [
+                    {"name": "x", "sources": ["s"], "max_nodes": 1, "shared": False}
+                ],
+                "check": check,
+            }
+            with self.assertRaises(ValueError, msg=str(check)):
+                worker._parse_config(document)
 
     def test_partial_sources_below_majority_keeps_snapshot(self) -> None:
         config = dataclasses.replace(

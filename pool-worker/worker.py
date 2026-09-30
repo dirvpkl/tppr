@@ -23,7 +23,7 @@ from urllib.request import Request, urlopen
 
 import yaml  # type: ignore[import-untyped]
 
-from common.upstream import connect_upstream
+from common import probe
 
 SERVICE_NAME = "proxy-pool-pool-worker"
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}\Z")
@@ -107,8 +107,8 @@ class Pool:
 @dataclass(frozen=True)
 class CheckSettings:
     enabled: bool
-    host: str
-    port: int
+    spec: probe.ProbeSpec | None
+    expect: probe.ExpectSpec
     timeout_s: int
     workers: int
 
@@ -318,26 +318,20 @@ def _parse_check(raw: object) -> CheckSettings:
     """Liveness probing. Absent section means disabled, never a surprise slowdown."""
     if raw is None:
         return CheckSettings(
-            False, "", 0, DEFAULT_CHECK_TIMEOUT_S, DEFAULT_CHECK_WORKERS
+            False,
+            None,
+            probe.ExpectSpec(),
+            DEFAULT_CHECK_TIMEOUT_S,
+            DEFAULT_CHECK_WORKERS,
         )
     table = _table(raw, "check")
     enabled = table.get("enabled", True)
     if type(enabled) is not bool:
         raise ValueError("check.enabled must be a boolean")
-    url = _text(table, "url")
-    parsed = urlparse(url)
-    if parsed.scheme == "https":
-        port = parsed.port or 443
-    elif parsed.scheme == "http":
-        port = parsed.port or 80
-    else:
-        raise ValueError("check.url must be an HTTP(S) URL")
-    if not parsed.hostname:
-        raise ValueError("check.url must contain a host")
     return CheckSettings(
         enabled=cast(bool, enabled),
-        host=parsed.hostname,
-        port=port,
+        spec=probe.parse_probe_spec(table),
+        expect=probe.parse_expect_spec(table.get("expect")),
         timeout_s=_optional_integer(
             table,
             "timeout_s",
@@ -507,23 +501,19 @@ def _merge_sources(
     return nodes, dropped
 
 
-def _check_node(node: Node, host: str, port: int, timeout_s: float) -> bool:
-    """True when the proxy completes a tunnel to the check target.
+def _check_node(
+    node: Node, spec: probe.ProbeSpec, expect: probe.ExpectSpec, timeout_s: float
+) -> bool:
+    """Full HTTP exchange through the proxy; only dead nodes are filtered.
 
-    Nodes of types the checker cannot speak pass through untouched; filtering
-    them would gut the pool on a capability gap, not on evidence.
+    Live and skipped nodes are kept: nodes of types the checker cannot speak
+    pass through untouched; filtering them would gut the pool on a capability
+    gap, not on evidence.
     """
-    proxy = node.proxy
-    if proxy.get("type") not in {"http", "socks5"}:
-        return True
-    try:
-        sock = connect_upstream(proxy, host, port, timeout_s)
-    except (OSError, ValueError):
+    result = probe.probe_node(node.proxy, spec, expect, timeout_s)
+    if result.verdict == probe.DEAD:
+        LOG.debug("probe dead %s: %s", node.fingerprint[:8], result.reason)
         return False
-    try:
-        sock.close()
-    except OSError:
-        pass
     return True
 
 
@@ -531,6 +521,9 @@ def _check_all(
     config: WorkerConfig, nodes: dict[str, Node]
 ) -> tuple[dict[str, Node], int, int]:
     check = config.check
+    spec = check.spec
+    if spec is None:
+        return dict(nodes), 0, 0
     fingerprints = sorted(nodes)
     if not fingerprints:
         return {}, 0, 0
@@ -540,8 +533,8 @@ def _check_all(
             fingerprint: executor.submit(
                 _check_node,
                 nodes[fingerprint],
-                check.host,
-                check.port,
+                spec,
+                check.expect,
                 float(check.timeout_s),
             )
             for fingerprint in fingerprints

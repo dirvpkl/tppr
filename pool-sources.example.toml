@@ -11,15 +11,31 @@ max_workers = 4
 listen = "0.0.0.0"
 port = 8080
 
-# Liveness probing. Every merged node that speaks HTTP/SOCKS5 must complete a
-# tunnel to url, or it never reaches a pool file. Other protocols pass through
-# unchecked. Omit this section to disable probing entirely.
-# url stays a plain target for now; method/headers/body/expected_status arrive
-# later without breaking this shape.
+# Liveness probing. Every merged node that speaks HTTP/SOCKS5 must pass a real
+# HTTP exchange against url, or it never reaches a pool file. Other protocols
+# pass through unchecked. Omit this section to disable probing entirely.
+# method is any uppercase token (GET/POST/PATCH/...); headers/cookies/body
+# shape the request. Without [check.expect] any completed exchange is live;
+# add it to require status codes ("2xx" classes allowed, so 400 can be a
+# valid answer), header/body/cookie matches and a latency ceiling.
 [check]
 url = "https://www.gstatic.com/generate_204"
+method = "GET"
 timeout_s = 5
 workers = 150
+# headers = { Authorization = "Bearer xxx" }
+# cookies = { session = "abc" }
+# body = '{"op":"ping"}'
+# [check.expect]
+# status = [200, 204]
+# max_latency_ms = 3000
+#   [check.expect.body]
+#   contains = "ok"
+#   [[check.expect.headers]]
+#   name = "Content-Type"
+#   contains = "json"
+#   [[check.expect.cookies]]
+#   name = "uid"
 
 [[sources]]
 name = "radikal-verified"

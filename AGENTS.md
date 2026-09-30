@@ -57,7 +57,9 @@ mihomo/providers/mine.yaml (paid proxies) ────┴─▶ inlined into gen
 
 - Worker: parallel fetch (`max_workers`), canonical-fingerprint dedupe,
   deterministic pool assignment, `max_nodes: 1000`, refresh every 300 s,
-  liveness probing of HTTP/SOCKS5 nodes via `[check]` before bucketing.
+  HTTP-level liveness probing of HTTP/SOCKS5 nodes (`common/probe.py`: real
+  request through the tunnel, configurable method/headers/body/cookies,
+  `[check.expect]` matching on status/headers/body/cookies/latency).
 - Worker drops nodes Mihomo cannot parse (ss cipher allowlist incl. the
   `2022-blake3` base64 rule, UUID check for vmess/vless, server/port sanity).
   Count is visible as `dropped_nodes` in `/healthz`.
@@ -174,9 +176,11 @@ pool contents — in that order.
 
 ## Known limitations / next
 
-- No proxy-level liveness gate: pool nodes are validated for parseability, not
-  dialed. A handshake-probing filter in the worker would fix pool quality
-  properly.
+- Pool nodes pass an HTTP-level liveness gate (`common/probe.py`): the probe
+  completes a real request through each HTTP/SOCKS5 node and matches status,
+  headers, body, cookies and latency. Trojan/VLESS/SOCKS4 and stranger
+  protocols still pass through unchecked — extending the prober to them is
+  the remaining pool-quality work.
 - Hash gate reaches only HTTP/SOCKS5 upstreams (~65% of a pool). Planned, not
   built: Trojan + VLESS forwarding in `hash-gate/gate.py` (stdlib TLS and
   framing, lifts coverage to ~90%), then VMess + Shadowsocks (needs an AEAD
