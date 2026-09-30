@@ -1,5 +1,7 @@
 # proxy-pool 0.12.0 — a global pool, LAN-reachable proxy ports, an optional dispatcher, pinned accounts, and local pool aggregation.
 
+> Vibe-coded side project, built to demo a fun idea: a self-hosted proxy router.
+
 ## What it does
 - `proxy-pool-mihomo-relay` exposes HTTP/SOCKS inside Docker and publishes the
   proxy ports on all host interfaces (`HOST_MIXED_PORT`, 17890 in the checked-in
