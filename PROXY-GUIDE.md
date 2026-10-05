@@ -4,6 +4,17 @@ How to create and manage proxies in this repo. All commands run from the repo
 root. `services.toml`, `pool-sources.toml` and `mihomo/providers/mine.yaml`
 are gitignored: credentials never leave the machine.
 
+## One profile per service, no sharing (HARD RULE)
+
+Every service gets its OWN upstream node(s) — never point two services at
+the same paid node (e.g. a `tgN` node serves only its own `telegramN`
+service). Sharing gets accounts rate-limited or banned together and hides
+per-service breakage. When a service needs egress: add a NEW node in
+`mine.yaml` (new credentials), then point only that service at it. A
+service without its own node gets no primary — pool-only is not a fallback,
+it is an outage waiting to happen; say so instead of wiring it to
+someone else's node.
+
 ## Port map
 
 | Port | What | Auth |
@@ -100,6 +111,21 @@ name = "rotate"
 port = 20005
 balance = "round-robin"
 subscriptions = ["free-pool"]
+```
+
+Externally steered exit: the group is a plain `select` list and never moves
+on its own — a prober container picks the node (see `post-prober/`). The
+service needs `select = true` (requires `subscriptions`, forbids everything
+else); the probe itself lives in the gitignored `post-prober.toml` +
+`post-prober-body.json` (copy the `.example` files to start):
+
+```toml
+[[services]]
+name = "managed"
+subscriptions = ["my-vless"]
+select = true
+username = "managed"
+password = "at-least-8-chars"
 ```
 
 Connect to any account through the dispatcher (HTTP and SOCKS5 both work):
