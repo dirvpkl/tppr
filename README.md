@@ -91,6 +91,7 @@
 - `lock_proxy = true` removes every fallback source for that account. When its proxy is down the connection is rejected instead of leaving through a free node. The generator refuses to combine `lock_proxy` with `fallback`/`subscriptions`.
 - `fallback = ["name"]` inserts extra named proxies between the primary and the free pool.
 - `balance = "round-robin"` turns the group into a load-balance pool: every new connection exits through the next node instead of sticking to one. It needs `subscriptions` and forbids `primary`, `fallback` and `lock_proxy`. The effective variety equals the currently healthy nodes, so a free pool rotates between its survivors.
+- **One profile per service, no sharing.** Every service gets its OWN upstream node(s) — never point two services at the same paid node. Sharing gets accounts limited or banned together and hides per-service breakage. A service without its own node gets no primary; pool-only is an outage waiting to happen, not a fallback.
 
 ## Hash-routed expiring access
 - Port `17894` serves the all-pools mix without touching Mihomo (override with

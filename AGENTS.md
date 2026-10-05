@@ -173,6 +173,10 @@ pool contents — in that order.
   a report.
 - Temp work goes to the platform temp dir, never into the repo. Clean up probe
   containers/files when done.
+- **One profile per service, no sharing.** Every service gets its OWN
+  upstream node(s) in `mine.yaml` (new credentials per service). Never
+  point two services at the same paid node. A service without its own
+  node gets no primary.
 
 ## Known limitations / next
 
