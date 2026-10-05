@@ -15,6 +15,16 @@ service without its own node gets no primary — pool-only is not a fallback,
 it is an outage waiting to happen; say so instead of wiring it to
 someone else's node.
 
+## Steady state (keep it like this)
+
+Every service resolves to its OWN named node — verify with
+`services.toml` (`name = X` must be followed by `primary = "X"` for all
+managed services, except `select = true` accounts like `opencode-acc`).
+Spot-check after every change: regenerate (`generate.py`), validate
+(`compose config`), reload, then CONNECT-test 2–3 services. If a new
+service arrives: create its node in `mine.yaml` first (new credentials),
+then the service block, then regenerate → validate → reload → probe.
+
 ## Port map
 
 | Port | What | Auth |
