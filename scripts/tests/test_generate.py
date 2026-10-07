@@ -459,6 +459,141 @@ subscriptions = ["extra"]
 balance = "lottery"
 """)
 
+    def test_renders_per_subscription_health_override(self) -> None:
+        health, parsed, subscriptions, dispatcher, _ = self.load("""
+[[subscriptions]]
+name = "extra"
+url = "https://example.com/extra"
+interval = 21600
+
+[subscriptions.health]
+url = "https://example.com/probe"
+interval = 15
+expected_status = 404
+
+[[services]]
+name = "probed"
+port = 20001
+subscriptions = ["extra"]
+""")
+        self.assertEqual(subscriptions[0].health is not None, True)
+        rendered = generate.render_config(
+            BASE, parsed, subscriptions, health, {}, dispatcher
+        )
+        provider = rendered[rendered.index('  "extra":') :]
+        self.assertIn('      url: "https://example.com/probe"', provider)
+        self.assertIn("      interval: 15", provider)
+        self.assertIn("      expected-status: 404", provider)
+        group = rendered[rendered.index('name: "SVC_probed"') :]
+        self.assertIn('    url: "https://example.com/probe"', group)
+        self.assertIn("    interval: 15", group)
+        self.assertIn("    expected-status: 404", group)
+
+    def test_rejects_mixed_health_providers_in_one_service(self) -> None:
+        health, parsed, subscriptions, dispatcher, _ = self.load("""
+[[subscriptions]]
+name = "extra"
+url = "https://example.com/extra"
+interval = 21600
+
+[subscriptions.health]
+url = "https://example.com/probe"
+interval = 15
+
+[[subscriptions]]
+name = "plain"
+url = "https://example.com/plain"
+interval = 21600
+
+[[services]]
+name = "mixed"
+port = 20001
+subscriptions = ["extra", "plain"]
+""")
+        with self.assertRaisesRegex(ValueError, "different health"):
+            generate.render_config(BASE, parsed, subscriptions, health, {}, dispatcher)
+
+    def test_renders_select_group_without_health_lines(self) -> None:
+        health, parsed, subscriptions, dispatcher, _ = self.load("""
+[[services]]
+name = "managed"
+port = 20001
+subscriptions = ["extra"]
+select = true
+""")
+        self.assertTrue(parsed[0].select)
+        rendered = generate.render_config(
+            BASE, parsed, subscriptions, health, {}, dispatcher
+        )
+        group = rendered[rendered.index('name: "SVC_managed"') :]
+        group = group[: group.index("empty-fallback: REJECT")]
+        self.assertIn("    type: select", group)
+        self.assertIn('    use:\n      - "extra"', group)
+        self.assertNotIn("    url:", group)
+        self.assertNotIn("    interval:", group)
+
+    def test_rejects_select_with_primary(self) -> None:
+        with self.assertRaisesRegex(ValueError, "steered externally"):
+            self.load(
+                """
+[[services]]
+name = "managed"
+port = 20001
+primary = "proxy-a"
+subscriptions = ["extra"]
+select = true
+""",
+                {"proxy-a"},
+            )
+
+    def test_rejects_select_without_subscriptions(self) -> None:
+        with self.assertRaisesRegex(ValueError, "select requires"):
+            self.load(
+                """
+[[services]]
+name = "managed"
+port = 20001
+primary = "proxy-a"
+lock_proxy = true
+select = true
+""",
+                {"proxy-a"},
+            )
+
+    def test_rejects_select_with_balance(self) -> None:
+        with self.assertRaisesRegex(ValueError, "steered externally"):
+            self.load("""
+[[services]]
+name = "managed"
+port = 20001
+subscriptions = ["extra"]
+balance = "round-robin"
+select = true
+""")
+
+    def test_rejects_unknown_health_key(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown keys: session"):
+            self.load("""
+[[subscriptions]]
+name = "extra"
+url = "https://example.com/extra"
+interval = 21600
+
+[subscriptions.health]
+url = "https://example.com/probe"
+session = "ses_live"
+""")
+
+    def test_rejects_unknown_subscription_key(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown keys: healt"):
+            self.load("""
+[[subscriptions]]
+name = "extra"
+url = "https://example.com/extra"
+interval = 21600
+healt = true
+""")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,17 @@
+[target]
+group = "SVC_managed"
+provider = "my-vless"
+username = "managed"
+
+[probe]
+url = "https://example.com/api/endpoint"
+method = "POST"
+timeout_s = 15
+expected_status = 400
+interval_s = 15
+body_file = "/config/post-prober-body.json"
+
+[probe.headers]
+Content-Type = "application/json"
+x-opencode-session = "paste-live-session-here"
+User-Agent = "opencode/1.18.32 ai-sdk/provider-utils/4.0.40 runtime/node.js/24"

@@ -1,6 +1,8 @@
 .env
 services.toml
 pool-sources.toml
+post-prober.toml
+post-prober-body.json
 .workplanx/
 mihomo/generated/
 docker-compose.override.yml

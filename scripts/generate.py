@@ -55,6 +55,7 @@ class Subscription:
     name: str
     url: str
     interval: int
+    health: HealthSettings | None
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,7 @@ class Service:
     password: str | None
     lock_proxy: bool
     balance: str | None
+    select: bool
 
 
 TomlTable = dict[str, object]
@@ -110,6 +112,15 @@ def _text(table: TomlTable, field: str) -> str:
     return cast(str, value).strip()
 
 
+def _reject_unknown_keys(table: TomlTable, allowed: frozenset[str], label: str) -> None:
+    """A typo in a config key must abort the run, not be silently ignored —
+    a health check that quietly keeps the global default is a wrong config
+    that looks right."""
+    unknown = sorted(set(table) - allowed)
+    if unknown:
+        raise ValueError(f"{label} has unknown keys: {', '.join(unknown)}")
+
+
 def _integer(table: TomlTable, field: str, minimum: int, maximum: int) -> int:
     value = table.get(field)
     if type(value) is not int:
@@ -118,6 +129,14 @@ def _integer(table: TomlTable, field: str, minimum: int, maximum: int) -> int:
     if integer < minimum or integer > maximum:
         raise ValueError(f"{field} must be between {minimum} and {maximum}")
     return integer
+
+
+def _optional_integer(
+    table: TomlTable, field: str, default: int, minimum: int, maximum: int
+) -> int:
+    if field not in table:
+        return default
+    return _integer(table, field, minimum, maximum)
 
 
 def _optional_port(table: TomlTable, field: str) -> int | None:
@@ -216,8 +235,47 @@ def _load_services(
             MIN_SUBSCRIPTION_INTERVAL,
             MAX_SUBSCRIPTION_INTERVAL,
         )
+        _reject_unknown_keys(
+            table, frozenset({"name", "url", "interval", "health"}), field
+        )
+        raw_health = table.get("health")
+        health_override: HealthSettings | None = None
+        if raw_health is not None:
+            health_table = _table(raw_health, f"{field}.health")
+            _reject_unknown_keys(
+                health_table,
+                frozenset(
+                    {
+                        "url",
+                        "interval",
+                        "timeout",
+                        "max_failed_times",
+                        "expected_status",
+                    }
+                ),
+                f"{field}.health",
+            )
+            health_override = HealthSettings(
+                url=_text(health_table, "url"),
+                interval=_optional_integer(
+                    health_table, "interval", settings.interval, 1, 86400
+                ),
+                timeout=_optional_integer(
+                    health_table, "timeout", settings.timeout, 500, 120000
+                ),
+                max_failed_times=_optional_integer(
+                    health_table, "max_failed_times", settings.max_failed_times, 1, 100
+                ),
+                expected_status=_optional_integer(
+                    health_table,
+                    "expected_status",
+                    settings.expected_status,
+                    100,
+                    599,
+                ),
+            )
         subscription_names.add(name)
-        subscriptions.append(Subscription(name, url, interval))
+        subscriptions.append(Subscription(name, url, interval, health_override))
 
     known_provider_names = subscription_names | (local_provider_names or set())
     known_custom_names = custom_proxy_names or set()
@@ -390,6 +448,21 @@ def _load_services(
                 f"{field}.primary, {field}.fallback and {field}.lock_proxy"
             )
 
+        raw_select = table.get("select", False)
+        if type(raw_select) is not bool:
+            raise ValueError(f"{field}.select must be a boolean")
+        select_flag = cast(bool, raw_select)
+        if select_flag and not service_subscriptions:
+            raise ValueError(f"{field}.select requires {field}.subscriptions")
+        if select_flag and (
+            primary is not None or fallback or lock_proxy or balance is not None
+        ):
+            raise ValueError(
+                f"{field}.select is steered externally, so it forbids "
+                f"{field}.primary, {field}.fallback, {field}.lock_proxy and "
+                f"{field}.balance"
+            )
+
         names.add(name)
         services.append(
             Service(
@@ -402,6 +475,7 @@ def _load_services(
                 password,
                 lock_proxy,
                 balance,
+                select_flag,
             )
         )
     if dispatcher is None and usernames:
@@ -466,6 +540,17 @@ def _quote(value: str) -> str:
 
 
 def _service_group(service: Service, health: HealthSettings) -> str:
+    if service.select:
+        lines = [
+            f"  - name: {_quote(f'SVC_{service.name}')}",
+            "    type: select",
+            "    use:",
+        ]
+        lines.extend(
+            f"      - {_quote(subscription)}" for subscription in service.subscriptions
+        )
+        lines.append("    empty-fallback: REJECT")
+        return "\n".join(lines) + "\n"
     group_type = "load-balance" if service.balance is not None else "fallback"
     lines = [
         f"  - name: {_quote(f'SVC_{service.name}')}",
@@ -592,6 +677,22 @@ def _set_global_group_sources(
     return pattern.sub(lambda _: "\n".join(lines), text)
 
 
+def _service_health(
+    service: Service,
+    health_by_provider: dict[str, HealthSettings],
+    default: HealthSettings,
+) -> HealthSettings:
+    distinct = list(
+        dict.fromkeys(health_by_provider[name] for name in service.subscriptions)
+    )
+    if len(distinct) > 1:
+        raise ValueError(
+            f"services {service.name} mixes providers with different health "
+            "checks; give the custom-health subscription its own service"
+        )
+    return distinct[0] if distinct else default
+
+
 def render_config(
     base: str,
     services: list[Service],
@@ -609,10 +710,27 @@ def render_config(
         + [pool.name for pool in pools or []]
     )
     custom_names = list(custom_proxies)
+    health_by_provider: dict[str, HealthSettings] = {
+        name: health
+        for name in [s.name for s in subscriptions] + [p.name for p in pools or []]
+    }
+    for subscription in subscriptions:
+        if subscription.health is not None:
+            health_by_provider[subscription.name] = subscription.health
     if custom_names:
         rendered = _set_global_group_sources(rendered, free_providers, custom_names)
 
-    groups = "\n" + "".join(_service_group(service, health) for service in services)
+    groups = "\n" + "".join(
+        _service_group(
+            service,
+            (
+                health
+                if service.select
+                else _service_health(service, health_by_provider, health)
+            ),
+        )
+        for service in services
+    )
     if global_pools is not None:
         if global_pools.free_port is not None:
             groups += _select_group(
@@ -666,6 +784,7 @@ def render_config(
 
     provider_blocks: list[str] = []
     for subscription in subscriptions:
+        provider_health = subscription.health or health
         provider_blocks.append(
             "\n".join(
                 [
@@ -676,12 +795,12 @@ def render_config(
                     f"    interval: {subscription.interval}",
                     "    health-check:",
                     "      enable: true",
-                    f"      url: {_quote(health.url)}",
-                    f"      interval: {health.interval}",
-                    f"      timeout: {health.timeout}",
+                    f"      url: {_quote(provider_health.url)}",
+                    f"      interval: {provider_health.interval}",
+                    f"      timeout: {provider_health.timeout}",
                     "      lazy: true",
-                    f"      max-failed-times: {health.max_failed_times}",
-                    f"      expected-status: {health.expected_status}",
+                    f"      max-failed-times: {provider_health.max_failed_times}",
+                    f"      expected-status: {provider_health.expected_status}",
                     "",
                 ]
             )

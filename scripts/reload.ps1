@@ -42,7 +42,7 @@ if ($LASTEXITCODE -ne 0) { throw "Mihomo rejected the generated config" }
 # Only the relay, the tester and the management API are recreated here: the
 # pool services are already healthy, and recreating them again would empty
 # the pools during startup.
-docker compose up -d --build --force-recreate tppr-mihomo-relay tppr-speed-tester tppr-api
+docker compose up -d --build --force-recreate tppr-mihomo-relay tppr-speed-tester tppr-api tppr-post-prober
 if ($LASTEXITCODE -ne 0) { throw "docker compose startup failed" }
 
 Write-Host "Proxy services applied. Run 'docker compose logs -f tppr-mihomo-relay' to inspect them."

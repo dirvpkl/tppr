@@ -22,6 +22,7 @@ credentials. Everything is localhost- or LAN-bound; there is no public surface.
 | `tppr-hash-gate` | random-exit/TTL gateway (profile `pool-aggregation`) | `0.0.0.0:17894` all (free/custom gateways internal-only) |
 | `tppr-api` | management REST API (always on) | `127.0.0.1:18080`, Bearer token |
 | `tppr-speed-tester` | throughput sweeps, manages `POOL` selection | none |
+| `tppr-post-prober` | steers one `select = true` group with a POST probe | none |
 
 `pool-aggregation` profile is auto-enabled by `reload.ps1` when
 `pool-sources.toml` exists. The controller (`19090`) has an **empty secret**:
@@ -39,6 +40,13 @@ it must stay on `127.0.0.1` or anyone on the LAN gets full control.
   random pool node (up to 5 random retries across distinct nodes when the pick
   is dead); username is any name, password is TTL seconds (5–2592000)
   counted from the first request.
+- A service with `select = true` gets a plain `select` group that Mihomo never
+  moves on its own; `post-prober` owns it. It reads the dispatcher port and the
+  account password from `services.toml` and rejects a target group/provider
+  that does not belong to that account. Request shape comes from the gitignored
+  `post-prober.toml` + `post-prober-body.json` (copy the `.example` files).
+  Heartbeat: no completed round within `POST_PROBER_HEARTBEAT_MAX_AGE_S`
+  (default 180) means unhealthy.
 - `20001–20004` — fixed per-service ports (pool groups, no auth).
 - `20005` — fixed port, `round-robin` rotation over the free pool.
 - `17890` — unpublished (container still listens on `:7890`, unreachable from
@@ -130,6 +138,14 @@ is often dead — first request failing then recovering is normal.
   groups switch instantly via `PUT /proxies/{group}`.
 - `PUT /providers/proxies/{name}` returns the CURRENT fetch error in its body —
   read it with `-SkipHttpErrorCheck`, it names the exact bad node.
+- The controller answers a `type: select` group as `"type": "Selector"` and a
+  `fallback` group as `"Fallback"` — capitalised, unlike the config. Compare
+  case-insensitively and accept both spellings. This bit once: the prober
+  compared against `"select"` and died 2873 times before it was caught.
+- `GET /providers/proxies` on a large stack returns megabytes (every pool
+  node). Query `GET /providers/proxies/{name}` for one provider instead.
+- `PUT /proxies/{group}` with a node that is not in `all` answers `400`, it
+  does not silently accept the name.
 - From this host `host.docker.internal` resolves to a LAN-ish IP, not
   loopback. Ports bound to `127.0.0.1` are unreachable through it; proxy ports
   are therefore published on `0.0.0.0`, the controller is not.
@@ -147,9 +163,11 @@ pool contents — in that order.
 
 ## Testing
 
-- `python -m unittest discover -s scripts/tests` (28: generator + accounts)
-- `python -m unittest discover -s pool-worker/tests` (6: dedupe, partition, isolation)
-- `python -m unittest discover -s hash-gate/tests` (8: validation, TTL, echo round-trip)
+- `python -m unittest discover -s scripts/tests` (36: generator + accounts)
+- `python -m unittest discover -s pool-worker/tests` (14: dedupe, partition, isolation)
+- `python -m unittest discover -s hash-gate/tests` (11: validation, TTL, echo round-trip)
+- `python -m unittest discover -s post-prober/tests` (14: config wiring, group type)
+- `python -m unittest discover -s api/tests` (9: accounts CRUD, leases)
 - Lint/type order: `uvx black --check`, `uvx ruff format --check`,
   `uvx ruff check`, `uvx isort --check-only`, `uvx mypy` (per directory).
 - black and ruff-format fight over multiline-string concatenation: avoid the

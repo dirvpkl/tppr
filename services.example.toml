@@ -28,6 +28,16 @@ expected_status = 204
 # name = "my-vless"
 # url = "https://example.com/subscription"
 # interval = 21600
+#
+# Optional per-subscription health probe: applies to this provider and to
+# service groups that use only this subscription (mixed groups are rejected
+# loudly). Missing keys fall back to the global [health] values. Mihomo
+# probes with GET; there is no way to send headers or a body.
+#
+# [subscriptions.health]
+# url = "https://example.com/probe"
+# interval = 15
+# expected_status = 404
 
 # One [[services]] block per client: a Windows app, or one account behind the
 # dispatcher. Up to 300 entries.
@@ -80,6 +90,21 @@ expected_status = 204
 # subscriptions = ["my-vless"]
 # balance = "round-robin"
 # username = "random"
+# password = "change-me-at-least-8"
+#
+# select         - true makes the group a plain select list whose current node
+#                is switched only from outside (PUT /proxies/SVC_<name>),
+#                e.g. by an external prober with its own check. Mihomo never
+#                moves it on its own. Requires subscriptions, forbids
+#                primary/fallback/lock_proxy/balance.
+#
+# Externally steered account (a prober container picks the node):
+#
+# [[services]]
+# name = "managed"
+# subscriptions = ["my-vless"]
+# select = true
+# username = "managed"
 # password = "change-me-at-least-8"
 #
 # Plain pool service, no custom proxy at all:

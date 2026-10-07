@@ -118,6 +118,37 @@ services:
     volumes:
       - tester-data:/app/data
 
+  tppr-post-prober:
+    build: ./post-prober
+    container_name: tppr-post-prober
+    restart: unless-stopped
+    depends_on:
+      - tppr-mihomo-relay
+    environment:
+      MIHOMO_API: http://tppr-mihomo-relay:9090
+      PROXY_HOST: tppr-mihomo-relay
+      # The dispatcher port and the probed account's password are read from
+      # services.toml, the single source for both.
+      SERVICES_FILE: /config/services.toml
+      PROBER_FILE: /config/post-prober.toml
+      HEARTBEAT_MAX_AGE_S: ${POST_PROBER_HEARTBEAT_MAX_AGE_S:-180}
+    volumes:
+      - ./services.toml:/config/services.toml:ro
+      - ./post-prober.toml:/config/post-prober.toml:ro
+      - ./post-prober-body.json:/config/post-prober-body.json:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os,time;p='/tmp/post-prober-heartbeat';exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < int(os.environ['HEARTBEAT_MAX_AGE_S']) else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
   tppr-api:
     build: ./api
     container_name: tppr-api

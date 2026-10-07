@@ -1,4 +1,4 @@
-# tppr 0.12.0 — a global pool, LAN-reachable proxy ports, an optional dispatcher, pinned accounts, and local pool aggregation.
+# tppr 0.13.0 — a global pool, LAN-reachable proxy ports, an optional dispatcher, pinned accounts, local pool aggregation, and custom probe checks.
 
 > Vibe-coded side project, built to demo a fun idea: a self-hosted proxy router.
 
@@ -33,13 +33,44 @@
   reachable from the LAN. Ports are declared in that file, not in `.env`, and are
   generated into `docker-compose.override.yml`. The controller API is the only
   thing still bound to `127.0.0.1`.
-- A service selects upstream nodes in one of two ways:
+- A service selects upstream nodes in one of three ways:
   - `subscriptions = ["name", ...]` — every node of those providers;
   - `primary = "proxy-name"` — one exact proxy, optionally followed by
-    `fallback = ["other-proxy"]` and the providers in `subscriptions`.
+    `fallback = ["other-proxy"]` and the providers in `subscriptions`;
+  - `select = true` — a plain list that never moves on its own; an external
+    prober steers it (see Custom probe checks).
 - Service groups are Mihomo `fallback` groups, so a dead node is skipped for
   the next one. `empty-fallback: REJECT` means an empty provider rejects the
   connection instead of leaking traffic direct.
+
+## Custom probe checks
+- Mihomo's own health check is a GET against one URL, which is not enough when
+  an endpoint only answers meaningfully to a POST with headers and a body. Two
+  pieces cover that:
+  - `[subscriptions.health]` overrides the provider health check for one
+    subscription: `url`, `interval`, `timeout`, `max_failed_times`,
+    `expected_status`, each falling back to the global `[health]` values. A
+    service may not mix providers with different checks — that is a generation
+    error, not a silent choice.
+  - `post-prober/` steers a `select = true` service with a real POST. Every
+    `interval_s` it sends the configured request through the group's current
+    node via the dispatcher and expects one exact status. Anything else means
+    reroll: it switches to the next candidate immediately instead of waiting,
+    so a node that answers `403 RegionError` (wrong country) is abandoned in
+    about a second. If nothing answers as expected, the group stays put and the
+    next round retries from the top.
+- The prober is a separate container because its job is a steering loop, not
+  node admission. It reads the dispatcher port and the account password from
+  `services.toml` (one source for both) and verifies at startup that
+  `target.group` and `target.provider` really belong to the account it probes —
+  a typo there aborts instead of quietly steering nothing.
+- Request shape lives in the gitignored `post-prober.toml` and
+  `post-prober-body.json`; copy the `.example` files to start. It carries the
+  URL, method, headers, body file, expected status and interval.
+- Each completed round touches a heartbeat file, and the container reports
+  unhealthy when no round lands within `POST_PROBER_HEARTBEAT_MAX_AGE_S`
+  (default 180 s, keep it above `interval_s`). "Running" and "still working"
+  stop being the same claim.
 
 ## Subscriptions
 - Add one `[[subscriptions]]` block per remote feed; Mihomo pulls it natively
@@ -166,6 +197,9 @@ git push -u origin master
 - `mihomo/generated/config.yaml` — generated active config; never edit it by hand.
 - `speed-tester/tester.py` — throughput sweeps (stdlib only, structured logs).
 - `speed-tester/history.py` — SQLite sweep history and cooldown tracking.
+- `post-prober/prober.py` — POST probe that steers one `select = true` service.
+- `post-prober.example.toml` / `post-prober-body.example.json` — request-shape
+  templates; the live copies are gitignored.
 - `scripts/README.md` — what each script does and every error it can raise.
 - `api/` — management REST API on `127.0.0.1:18080` (Bearer token): accounts CRUD, status, hash-lease revocation.
 - `scripts/smoke.ps1` — config + syntax sanity checks.

@@ -11,12 +11,14 @@ if (Test-Path -LiteralPath ".\pool-sources.toml") {
     docker compose --profile pool-aggregation config --quiet
     if ($LASTEXITCODE -ne 0) { throw "pool-aggregation compose config failed" }
 }
-python -m py_compile speed-tester/tester.py speed-tester/history.py scripts/generate.py
+python -m py_compile speed-tester/tester.py speed-tester/history.py scripts/generate.py post-prober/prober.py
 if ($LASTEXITCODE -ne 0) { throw "Python sources do not compile" }
 python -m unittest discover -s speed-tester/tests -v
 if ($LASTEXITCODE -ne 0) { throw "speed-tester tests failed" }
 python -m unittest discover -s scripts/tests -v
 if ($LASTEXITCODE -ne 0) { throw "config generator tests failed" }
+python -m unittest discover -s post-prober/tests -v
+if ($LASTEXITCODE -ne 0) { throw "post-prober tests failed" }
 try {
   python -c "import yaml" 2>$null
   if ($LASTEXITCODE -eq 0) {

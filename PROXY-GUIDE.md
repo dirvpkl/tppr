@@ -138,6 +138,22 @@ username = "managed"
 password = "at-least-8-chars"
 ```
 
+Then copy `post-prober.example.toml` to `post-prober.toml` and
+`post-prober-body.example.json` to `post-prober-body.json`, fill in the URL,
+headers and expected status, and run `./scripts/reload.ps1`. The prober refuses
+to start if `target.group` / `target.provider` do not belong to that account, so
+a typo there is a startup error, not a silently idle group.
+
+Check what it settled on:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:19090/proxies/SVC_managed | Select-Object -ExpandProperty now
+docker inspect tppr-post-prober --format '{{.State.Health.Status}}'
+```
+
+`unhealthy` means no probe round completed within
+`POST_PROBER_HEARTBEAT_MAX_AGE_S` (default 180 s).
+
 Connect to any account through the dispatcher (HTTP and SOCKS5 both work):
 
 ```
