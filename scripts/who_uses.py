@@ -5,6 +5,7 @@ Prints service -> primary node -> upstream server:port plus usage counts.
 Never prints credentials. Read-only: touches nothing.
 Usage: python scripts/who_uses.py [--service NAME]
 """
+
 import re
 import sys
 from pathlib import Path
@@ -23,12 +24,14 @@ def parse_services(path):
         subs = re.search(r"^subscriptions = (\[[^\]]*\])", body, re.M)
         sel = re.search(r"^select = true", body, re.M)
         if nm:
-            out.append({
-                "name": nm.group(1),
-                "primary": prim.group(1) if prim else "-",
-                "subs": subs.group(1) if subs else "-",
-                "select": bool(sel),
-            })
+            out.append(
+                {
+                    "name": nm.group(1),
+                    "primary": prim.group(1) if prim else "-",
+                    "subs": subs.group(1) if subs else "-",
+                    "select": bool(sel),
+                }
+            )
     return out
 
 
