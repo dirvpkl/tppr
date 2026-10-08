@@ -5,7 +5,8 @@ Entry points for this repo. Run them from the repo root.
 ## `reload.ps1` — apply everything
 
 ```powershell
-./scripts/reload.ps1
+./scripts/reload.ps1        # fast path when pools are fresh (seconds)
+./scripts/reload.ps1 -Full  # rebuild images, refetch pools from scratch (minutes)
 ```
 
 What it does, in order:
@@ -13,8 +14,11 @@ What it does, in order:
 1. copies `services.example.toml` to `services.toml` if that file is missing;
 2. runs `generate.py` (fails loudly on any config error);
 3. validates the Compose file;
-4. if `pool-sources.toml` exists, starts the `pool-aggregation` profile and waits
-   for `tppr-pool-worker` to report `healthy` — pool files are served over
+4. if `pool-sources.toml` exists and the worker is already ready with fresh
+   pool snapshots, leaves the `pool-aggregation` profile alone (fast path) —
+   recreating it would empty the pools and force a minutes-long refetch.
+   Otherwise starts the profile and waits for `tppr-pool-worker` `/healthz`
+   `ready` (docker health status lags behind it) — pool files are served over
    the internal Docker network, so Mihomo needs them before it starts;
 5. validates the generated config with `mihomo -t`;
 6. recreates only the relay and the speed tester, leaving the healthy pool
