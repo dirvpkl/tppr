@@ -191,10 +191,12 @@ pool contents — in that order.
   a report.
 - Temp work goes to the platform temp dir, never into the repo. Clean up probe
   containers/files when done.
-- **One profile per service, no sharing.** Every service gets its OWN
-  upstream node(s) in `mine.yaml` (new credentials per service). Never
-  point two services at the same paid node. A service without its own
-  node gets no primary.
+- **One node per service, proxies may repeat.** A paid proxy is the upstream
+  account (server/port/credentials); a node is a named entry in `mine.yaml`
+  that uses it. Several nodes may share one paid proxy — same creds under
+  different names (e.g. `tg1`, `cfprg`, `ggfr` on one account) — that is
+  normal. Each service still gets its OWN node (`name = X` →
+  `primary = "X"`). A service without its own node gets no primary.
 
 ## Known limitations / next
 

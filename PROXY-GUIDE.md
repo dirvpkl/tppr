@@ -4,16 +4,17 @@ How to create and manage proxies in this repo. All commands run from the repo
 root. `services.toml`, `pool-sources.toml` and `mihomo/providers/mine.yaml`
 are gitignored: credentials never leave the machine.
 
-## One profile per service, no sharing (HARD RULE)
+## One node per service, proxies may repeat
 
-Every service gets its OWN upstream node(s) — never point two services at
-the same paid node (e.g. a `tgN` node serves only its own `telegramN`
-service). Sharing gets accounts rate-limited or banned together and hides
-per-service breakage. When a service needs egress: add a NEW node in
-`mine.yaml` (new credentials), then point only that service at it. A
-service without its own node gets no primary — pool-only is not a fallback,
-it is an outage waiting to happen; say so instead of wiring it to
-someone else's node.
+A paid proxy is the upstream account (server, port, credentials); a node is
+a named entry in `mine.yaml` that uses it. Several nodes may point at the
+same paid proxy — same creds under different names (e.g. `tg1`, `cfprg`,
+`ggfr` on one account) — that is normal. Each service still gets its OWN
+node: `name = X` must be followed by `primary = "X"` (except `select = true`
+accounts like `opencode-acc`). When a service needs egress: add a node in
+`mine.yaml` for it (creds may repeat an existing paid proxy), then point
+only that service at it. A service without its own node gets no primary —
+pool-only is not a fallback, it is an outage waiting to happen.
 
 ## Steady state (keep it like this)
 
@@ -22,7 +23,8 @@ Every service resolves to its OWN named node — verify with
 managed services, except `select = true` accounts like `opencode-acc`).
 Spot-check after every change: regenerate (`generate.py`), validate
 (`compose config`), reload, then CONNECT-test 2–3 services. If a new
-service arrives: create its node in `mine.yaml` first (new credentials),
+service arrives: create its node in `mine.yaml` first (creds may repeat an
+existing paid proxy),
 then the service block, then regenerate → validate → reload → probe.
 
 ## Port map
