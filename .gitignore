@@ -16,3 +16,5 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+# persistent container logs (survive recreates, never committed)
+logs/

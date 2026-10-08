@@ -1,4 +1,7 @@
+import logging
+import logging.handlers
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -358,6 +361,38 @@ class CandidateScanTests(unittest.TestCase):
             )
         probed = [call.args[1] for call in probe.call_args_list]
         self.assertEqual(["fresh"], probed)
+
+
+class LoggerTests(unittest.TestCase):
+    def test_log_file_adds_rotating_handler(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "tester.log")
+            with patch.dict("os.environ", {"LOG_FILE": path}):
+                logger = tester._logger()
+            try:
+                file_handlers = [
+                    handler
+                    for handler in logger.handlers
+                    if isinstance(handler, logging.handlers.RotatingFileHandler)
+                ]
+                self.assertEqual(1, len(file_handlers))
+                logger.info("hello")
+                for handler in logger.handlers:
+                    handler.flush()
+                self.assertIn("hello", Path(path).read_text(encoding="utf-8"))
+            finally:
+                for handler in logger.handlers:
+                    handler.close()
+                logger.handlers = []
+
+    def test_no_log_file_keeps_stdout_only(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            logger = tester._logger()
+        try:
+            self.assertEqual(1, len(logger.handlers))
+            self.assertIsInstance(logger.handlers[0], logging.StreamHandler)
+        finally:
+            logger.handlers = []
 
 
 if __name__ == "__main__":

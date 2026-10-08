@@ -1,5 +1,14 @@
 name: tppr
 
+# Shared json-file rotation: bounds daemon disk use. It does NOT survive
+# `recreate` (new container id); recreate-proof history lives in ./logs/
+# file logs (see per-service volumes below).
+x-logging: &tppr-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 # The relay exposes the global endpoint and controller on Windows localhost.
 # Additional fixed service ports are generated into docker-compose.override.yml.
 # The optional pool-aggregation profile adds internal SubConv and pool-worker services.
@@ -9,14 +18,25 @@ services:
     image: metacubex/mihomo:${MIHOMO_TAG:?mihomo image tag is required, e.g. MIHOMO_TAG=latest}
     container_name: tppr-mihomo-relay
     restart: unless-stopped
+    logging: *tppr-logging
     volumes:
       - ./mihomo:/etc/mihomo
+      - ./logs:/var/log/tppr
     ports:
       # The mixed endpoint is intentionally unpublished: pool access goes
       # through authenticated dispatcher accounts, fixed service ports and
       # the hash gate. The controller stays on localhost.
       - "127.0.0.1:${HOST_CONTROLLER_PORT:?host controller port is required, e.g. HOST_CONTROLLER_PORT=9090}:9090"
-    command: ["-d", "/etc/mihomo", "-f", "/etc/mihomo/generated/config.yaml"]
+    # tee keeps stdout (docker logs) AND appends a recreate-proof copy to the
+    # mounted ./logs volume. No new ports, no secrets in the stream.
+    # NOTE: entrypoint (not command): the image ENTRYPOINT is /mihomo, a
+    # command list would be appended to it and misparsed.
+    entrypoint:
+      [
+        "sh",
+        "-c",
+        "/mihomo -d /etc/mihomo -f /etc/mihomo/generated/config.yaml 2>&1 | tee -a /var/log/tppr/mihomo-relay.log",
+      ]
 
   tppr-subconv:
     image: wouisb/subconv:latest
@@ -89,6 +109,7 @@ services:
     build: ./speed-tester
     container_name: tppr-speed-tester
     restart: unless-stopped
+    logging: *tppr-logging
     depends_on:
       - tppr-mihomo-relay
     environment:
@@ -115,13 +136,16 @@ services:
       HISTORY_COOLDOWN_FAILS: ${HISTORY_COOLDOWN_FAILS:?consecutive failures before cooldown is required, e.g. HISTORY_COOLDOWN_FAILS=3}
       HISTORY_COOLDOWN_H: ${HISTORY_COOLDOWN_H:?cooldown decay window in hours is required, e.g. HISTORY_COOLDOWN_H=1}
       HISTORY_WINDOW_H: ${HISTORY_WINDOW_H:?history window in hours is required, e.g. HISTORY_WINDOW_H=24}
+      LOG_FILE: /var/log/tppr/tppr-speed-tester.log
     volumes:
       - tester-data:/app/data
+      - ./logs:/var/log/tppr
 
   tppr-post-prober:
     build: ./post-prober
     container_name: tppr-post-prober
     restart: unless-stopped
+    logging: *tppr-logging
     depends_on:
       - tppr-mihomo-relay
     environment:
@@ -132,10 +156,12 @@ services:
       SERVICES_FILE: /config/services.toml
       PROBER_FILE: /config/post-prober.toml
       HEARTBEAT_MAX_AGE_S: ${POST_PROBER_HEARTBEAT_MAX_AGE_S:-180}
+      LOG_FILE: /var/log/tppr/tppr-post-prober.log
     volumes:
       - ./services.toml:/config/services.toml:ro
       - ./post-prober.toml:/config/post-prober.toml:ro
       - ./post-prober-body.json:/config/post-prober-body.json:ro
+      - ./logs:/var/log/tppr
     healthcheck:
       test:
         [
@@ -153,6 +179,7 @@ services:
     build: ./api
     container_name: tppr-api
     restart: unless-stopped
+    logging: *tppr-logging
     expose:
       - "8080"
     ports:
@@ -161,11 +188,13 @@ services:
       API_TOKEN: ${API_TOKEN:?management API token is required, generate one with python -c "import secrets;print(secrets.token_urlsafe(32))"}
       PORT: ${API_PORT:-18080}
       WORKER_URL: http://tppr-pool-worker:8080
+      LOG_FILE: /var/log/tppr/tppr-api.log
     volumes:
       - ./services.toml:/config/services.toml
       - ./mihomo:/mihomo:ro
       - ./scripts:/scripts:ro
       - hash-gate-data:/hashdata
+      - ./logs:/var/log/tppr
     healthcheck:
       test:
         [

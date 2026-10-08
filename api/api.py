@@ -15,6 +15,7 @@ import argparse
 import hmac
 import json
 import logging
+import logging.handlers
 import os
 import re
 import sqlite3
@@ -520,6 +521,17 @@ def run(config: AppConfig) -> int:
         level=logging.INFO,
         format="%(asctime)s level=%(levelname)s service=%(name)s %(message)s",
     )
+    log_file = os.environ.get("LOG_FILE", "").strip()
+    if log_file:
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=10_485_760, backupCount=5
+        )
+        file_handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s level=%(levelname)s service=%(name)s %(message)s"
+            )
+        )
+        logging.getLogger().addHandler(file_handler)
     state = AppState(lock=threading.Lock(), config=config)
     server = ThreadingHTTPServer((config.listen, config.port), ApiHandler)
     server.daemon_threads = True

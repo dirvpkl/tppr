@@ -188,7 +188,10 @@ pool contents — in that order.
   host ports in `.env`, gate ports in compose env with `:-defaults`.
 - Never read container logs without being asked; the controller API and
   `/healthz` are the observability path. Never `docker compose logs -f` into
-  a report.
+  a report. When logs are asked for: `./logs/*.log` (relay/tester/api/prober
+  file logs on a mounted volume) survive container recreates, `docker logs`
+  does not; `LOG_FILE` env points each python service at its file, the relay
+  tees stdout via `tee -a`.
 - Temp work goes to the platform temp dir, never into the repo. Clean up probe
   containers/files when done.
 - **One node per service, proxies may repeat.** A paid proxy is the upstream

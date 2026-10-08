@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.handlers
 import os
 import time
 import tomllib
@@ -396,6 +397,15 @@ def main() -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
+    log_file = os.environ.get("LOG_FILE", "").strip()
+    if log_file:
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=10_485_760, backupCount=5
+        )
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+        )
+        logging.getLogger().addHandler(file_handler)
     config = load_config()
     controller = Controller(config.api)
     for _ in range(STARTUP_ATTEMPTS):

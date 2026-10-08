@@ -11,6 +11,7 @@ import concurrent.futures
 import http.client
 import json
 import logging
+import logging.handlers
 import os
 import random
 import sys
@@ -142,6 +143,13 @@ def _logger() -> logging.Logger:
     logger = logging.getLogger(SERVICE_NAME)
     logger.handlers = [handler]
     logger.setLevel(logging.INFO)
+    log_file = os.environ.get("LOG_FILE", "").strip()
+    if log_file:
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=10_485_760, backupCount=5
+        )
+        file_handler.setFormatter(handler.formatter)
+        logger.addHandler(file_handler)
     return logger
 
 

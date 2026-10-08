@@ -27,6 +27,10 @@ profile:
 dns:
   enable: true
   nameserver:
+    # 127.0.0.11 is the Docker embedded DNS: the only resolver that knows
+    # compose service names (e.g. tppr-pool-worker). Public resolvers below
+    # answer everything else.
+    - 127.0.0.11
     - 8.8.8.8
     - 1.1.1.1
 
