@@ -670,11 +670,16 @@ def _set_global_group_sources(
     pattern = re.compile(r"(?m)^    use: \[[^\]\n]*\]$")
     if len(pattern.findall(text)) != 2:
         raise ValueError("base config must contain POOL and TEST_POOL select groups")
-    lines = [f"    use: [{', '.join(free_providers)}]"]
+    use_line = f"    use: [{', '.join(free_providers)}]"
+    pool_lines = [use_line]
     if custom_names:
-        lines.append("    proxies:")
-        lines.extend(f"      - {_quote(name)}" for name in custom_names)
-    return pattern.sub(lambda _: "\n".join(lines), text)
+        pool_lines.append("    proxies:")
+        pool_lines.extend(f"      - {_quote(name)}" for name in custom_names)
+    # POOL keeps pinned paid nodes; TEST_POOL benchmarks pool nodes only.
+    # Pinned nodes belong to no provider, so inlining them into TEST_POOL
+    # breaks the speed tester's provider-coverage check (fail loud).
+    replacements = iter(["\n".join(pool_lines), use_line])
+    return pattern.sub(lambda _: next(replacements), text)
 
 
 def _service_health(

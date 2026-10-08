@@ -290,11 +290,12 @@ lock_proxy = true
             rendered,
         )
         self.assertIn(
-            "  - name: TEST_POOL\n    type: select\n"
-            "    use: [free-vless, extra]\n"
-            '    proxies:\n      - "proxy-a"',
+            "  - name: TEST_POOL\n    type: select\n" "    use: [free-vless, extra]\n",
             rendered,
         )
+        test_pool = rendered.index("  - name: TEST_POOL\n")
+        next_group = rendered.index("  - name:", test_pool + 1)
+        self.assertNotIn("proxies:", rendered[test_pool:next_group])
 
     def test_renders_local_pool_provider(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
