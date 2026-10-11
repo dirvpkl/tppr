@@ -2,7 +2,11 @@
 url = "https://www.gstatic.com/generate_204"
 interval = 60
 timeout = 5000
-max_failed_times = 3
+# One failed check evicts a dead node from fallback groups: with free-pool
+# churn this caps 502 batches at ~one interval instead of two. A transient
+# blip may move the group off a good node, but fallback moves back up the
+# list once the top recovers, so the cost of a false move is one interval.
+max_failed_times = 1
 expected_status = 204
 
 # Optional single authenticated entry point for clients that support proxy auth.
