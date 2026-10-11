@@ -208,6 +208,27 @@ services:
       retries: 5
       start_period: 15s
 
+  tppr-tg-bot:
+    build: ./tg-bot
+    container_name: tppr-tg-bot
+    restart: unless-stopped
+    # Opt-in profile: the bot stays down until a token exists. Never in the
+    # default path, so token-less checkouts keep working untouched.
+    profiles: ["tg-bot"]
+    logging: *tppr-logging
+    # No ports: the bot only makes outbound HTTPS calls.
+    environment:
+      # Deliberately :- (not :?) : `config` interpolates profile-gated
+      # services too, so :? would break the token-less default path for
+      # everyone. A missing value fails LOUDLY inside the bot at startup
+      # instead (see BotConfig), which is the required behavior.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      MIHOMO_API: http://tppr-mihomo-relay:9090
+      TARGET_GROUP: ${TARGET_GROUP:-SVC_opencode-acc}
+      LOG_FILE: /var/log/tppr/tppr-tg-bot.log
+    volumes:
+      - ./logs:/var/log/tppr
+
 volumes:
   tester-data:
   hash-gate-data:

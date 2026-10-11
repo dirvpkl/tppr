@@ -212,7 +212,11 @@ pool contents — in that order.
   built: Trojan + VLESS forwarding in `hash-gate/gate.py` (stdlib TLS and
   framing, lifts coverage to ~90%), then VMess + Shadowsocks (needs an AEAD
   package, ~98%). Reality/XTLS-vision and Hysteria2 are out of scope.
-- No Telegram management bot yet (decided: aiogram 3.x when built).
+- Telegram rotation bot: `tg-bot/` (stdlib long-poll, no aiogram), opt-in
+  compose profile `tg-bot`, `/start` rotates `TARGET_GROUP` (default
+  `SVC_opencode-acc`) and replies old -> new. Needs `TELEGRAM_BOT_TOKEN` in
+  `.env` (BotFather); without it the container exits loudly. Never started
+  by the default path.
 - Scale-out idea (not built): one gateway port instead of N, pool chosen by
   username prefix (`free:<name>`, `batch2:<name>`). Separate paid batches
   become pool files, not new ports.
