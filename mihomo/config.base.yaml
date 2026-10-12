@@ -11,6 +11,11 @@ allow-lan: true
 bind-address: "*"
 mode: rule
 log-level: info
+# TCP keepalive on outbound tunnels: probes keep long-held connections
+# (e.g. Telegram long-polling through paid exits) alive through NAT and
+# middleboxes that reap idle flows. Flaky-poll experiment 2026-10-12.
+keep-alive-idle: 3
+keep-alive-interval: 3
 external-controller: 0.0.0.0:9090
 secret: ""
 
