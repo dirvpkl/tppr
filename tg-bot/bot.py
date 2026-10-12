@@ -46,6 +46,12 @@ class BotConfig:
         self.token = _getenv("TELEGRAM_BOT_TOKEN")
         self.api = _getenv("MIHOMO_API").rstrip("/")
         self.group = _getenv("TARGET_GROUP")
+        # Telegram traffic must leave through the relay pool, never direct:
+        # direct egress to Telegram DCs is filtered on this uplink (TLS EOF
+        # on 443 and 80, verified 2026-10-12). urllib routes HTTPS via the
+        # environment on its own; NO_PROXY keeps controller calls direct.
+        self.https_proxy = _getenv("HTTPS_PROXY")
+        self.no_proxy = _getenv("NO_PROXY")
 
 
 def _setup_logging() -> None:
@@ -183,6 +189,7 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     LOG.info("bot polling for /start, group=%s", config.group)
+    LOG.info("egress https_proxy=%s", config.https_proxy)
     offset = 0
     while True:
         try:

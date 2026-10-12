@@ -111,6 +111,18 @@ class ConfigTests(unittest.TestCase):
         ):
             bot.BotConfig()
 
+    def test_missing_proxy_fails_loudly(self) -> None:
+        environment = {
+            "TELEGRAM_BOT_TOKEN": "t",
+            "MIHOMO_API": "http://m:9090",
+            "TARGET_GROUP": "g",
+        }
+        with (
+            patch.dict("os.environ", environment, clear=True),
+            self.assertRaisesRegex(ValueError, "HTTPS_PROXY"),
+        ):
+            bot.BotConfig()
+
 
 if __name__ == "__main__":
     unittest.main()
