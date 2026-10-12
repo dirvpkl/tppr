@@ -225,13 +225,14 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       MIHOMO_API: http://tppr-mihomo-relay:9090
       TARGET_GROUP: ${TARGET_GROUP:-SVC_opencode-acc}
-      # Pooled egress for Telegram (direct path is filtered on this uplink):
-      # HTTPS via relay rules (-> POOL), controller stays direct via NO_PROXY.
-      HTTPS_PROXY: http://tppr-mihomo-relay:7890
-      NO_PROXY: tppr-mihomo-relay,localhost,127.0.0.1
+      # Dispatcher account for the paid exit (single source: services.toml,
+      # read by the bot itself — no credential duplication, nothing printed).
+      BOT_SERVICES_FILE: /config/services.toml
+      BOT_USERNAME: tg-bot
       LOG_FILE: /var/log/tppr/tppr-tg-bot.log
     volumes:
       - ./logs:/var/log/tppr
+      - ./services.toml:/config/services.toml:ro
 
 volumes:
   tester-data:

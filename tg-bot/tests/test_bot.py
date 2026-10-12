@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -87,7 +88,7 @@ class RotateGroupTests(unittest.TestCase):
             patch.object(bot, "select_node") as select,
         ):
             self.assertEqual(bot.rotate_group(config), ("b", "c"))
-        select.assert_called_once_with(config.api, config.group, "c")
+        select.assert_called_once_with(config, config.group, "c")
 
     def test_verify_mismatch_fails_loudly(self) -> None:
         config = make_config()
@@ -111,17 +112,62 @@ class ConfigTests(unittest.TestCase):
         ):
             bot.BotConfig()
 
-    def test_missing_proxy_fails_loudly(self) -> None:
+    def test_missing_username_fails_loudly(self) -> None:
         environment = {
             "TELEGRAM_BOT_TOKEN": "t",
             "MIHOMO_API": "http://m:9090",
             "TARGET_GROUP": "g",
+            "BOT_SERVICES_FILE": "/config/services.toml",
         }
         with (
             patch.dict("os.environ", environment, clear=True),
-            self.assertRaisesRegex(ValueError, "HTTPS_PROXY"),
+            self.assertRaisesRegex(ValueError, "BOT_USERNAME"),
         ):
             bot.BotConfig()
+
+    def test_missing_services_file_fails_loudly(self) -> None:
+        environment = {
+            "TELEGRAM_BOT_TOKEN": "t",
+            "MIHOMO_API": "http://m:9090",
+            "TARGET_GROUP": "g",
+            "BOT_USERNAME": "bot",
+        }
+        with (
+            patch.dict("os.environ", environment, clear=True),
+            self.assertRaisesRegex(ValueError, "BOT_SERVICES_FILE"),
+        ):
+            bot.BotConfig()
+
+
+class ProxyUrlTests(unittest.TestCase):
+    def _write_services(self, directory: str, body: str) -> str:
+        path = str(Path(directory) / "services.toml")
+        Path(path).write_text(body, encoding="utf-8")
+        return path
+
+    def test_builds_dispatcher_url(self) -> None:
+        body = (
+            "[dispatcher]\nport = 17893\n\n[[services]]\n"
+            'username = "bot"\npassword = "pw"\n'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write_services(directory, body)
+            url = bot._dispatcher_proxy_url(path, "http://relay:9090", "bot")
+        self.assertEqual(url, "http://bot:pw@relay:17893")
+
+    def test_missing_account_fails_without_names(self) -> None:
+        body = '[dispatcher]\nport = 17893\n\n[[services]]\nusername = "x"\n'
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write_services(directory, body)
+            with self.assertRaises(ValueError) as raised:
+                bot._dispatcher_proxy_url(path, "http://relay:9090", "someuser")
+        self.assertNotIn("someuser", str(raised.exception))
+
+    def test_missing_file_fails_loudly(self) -> None:
+        with self.assertRaises(ValueError):
+            bot._dispatcher_proxy_url(
+                "/nonexistent/services.toml", "http://relay:9090", "bot"
+            )
 
 
 if __name__ == "__main__":

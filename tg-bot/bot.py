@@ -6,8 +6,9 @@ old -> new node names, or with the error text when rotation fails. Anything
 that is not /start is ignored. No ports are published: the bot only makes
 outbound HTTPS calls (Telegram API, Mihomo controller).
 
-Secrets: TELEGRAM_BOT_TOKEN comes from the environment only and is never
-logged (request URLs carrying it are never printed).
+Secrets: TELEGRAM_BOT_TOKEN comes from the environment; the dispatcher
+account password comes from the mounted services.toml. Neither is ever
+logged (request URLs carrying them are never printed).
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import logging.handlers
 import os
 import sys
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -46,12 +48,57 @@ class BotConfig:
         self.token = _getenv("TELEGRAM_BOT_TOKEN")
         self.api = _getenv("MIHOMO_API").rstrip("/")
         self.group = _getenv("TARGET_GROUP")
-        # Telegram traffic must leave through the relay pool, never direct:
-        # direct egress to Telegram DCs is filtered on this uplink (TLS EOF
-        # on 443 and 80, verified 2026-10-12). urllib routes HTTPS via the
-        # environment on its own; NO_PROXY keeps controller calls direct.
-        self.https_proxy = _getenv("HTTPS_PROXY")
-        self.no_proxy = _getenv("NO_PROXY")
+        self.services_file = _getenv("BOT_SERVICES_FILE")
+        self.username = _getenv("BOT_USERNAME")
+        proxy_url = _dispatcher_proxy_url(self.services_file, self.api, self.username)
+        # Explicit openers: Telegram leaves only through the dispatcher
+        # (paid exit); the controller stays direct. No environment routing,
+        # so nothing can silently fall back to direct.
+        self.tg_opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+        )
+        self.direct_opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({})
+        )
+
+
+def _dispatcher_proxy_url(services_file: str, api: str, username: str) -> str:
+    """Dispatcher proxy URL for this bot's account.
+
+    Single source is the mounted services.toml (dispatcher host/port and the
+    account password all come from there, nothing is duplicated). The
+    assembled URL is used by the opener only and never logged.
+    """
+    try:
+        with open(services_file, "rb") as handle:
+            document = tomllib.load(handle)
+    except OSError as exc:
+        raise ValueError(f"cannot read services file: {exc}")
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"invalid services TOML: {exc}")
+    if not isinstance(document, dict):
+        raise ValueError("services file is not a table")
+    dispatcher = document.get("dispatcher")
+    port = dispatcher.get("port") if isinstance(dispatcher, dict) else None
+    if not isinstance(port, int):
+        raise ValueError("services file has no dispatcher port")
+    host = urllib.parse.urlsplit(api).hostname or ""
+    if not host:
+        raise ValueError("controller API URL has no host")
+    services = document.get("services")
+    if not isinstance(services, list):
+        raise ValueError("services file has no services list")
+    for service in services:
+        if isinstance(service, dict) and service.get("username") == username:
+            password = service.get("password", "")
+            if not isinstance(password, str) or not password:
+                raise ValueError("dispatcher account has no password")
+            quoted = (
+                f"{urllib.parse.quote(username, safe='')}"
+                f":{urllib.parse.quote(password, safe='')}"
+            )
+            return f"http://{quoted}@{host}:{port}"
+    raise ValueError("dispatcher account not found in services file")
 
 
 def _setup_logging() -> None:
@@ -73,7 +120,7 @@ def _telegram(config: BotConfig, method: str, payload: dict | None = None) -> di
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_S) as response:
+        with config.tg_opener.open(request, timeout=REQUEST_TIMEOUT_S) as response:
             envelope = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:200]
@@ -105,12 +152,12 @@ def send_message(config: BotConfig, chat_id: int, text: str) -> None:
     )
 
 
-def group_state(api: str, group: str) -> tuple[list[str], str]:
+def group_state(config: BotConfig, group: str) -> tuple[list[str], str]:
     request = urllib.request.Request(
-        f"{api}/proxies/{urllib.parse.quote(group, safe='')}"
+        f"{config.api}/proxies/{urllib.parse.quote(group, safe='')}"
     )
     try:
-        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_S) as response:
+        with config.direct_opener.open(request, timeout=REQUEST_TIMEOUT_S) as response:
             state = json.loads(response.read().decode("utf-8"))
     except OSError as exc:
         raise RuntimeError(f"controller GET group {group!r} failed: {exc}")
@@ -124,15 +171,15 @@ def group_state(api: str, group: str) -> tuple[list[str], str]:
     return members, current
 
 
-def select_node(api: str, group: str, name: str) -> None:
+def select_node(config: BotConfig, group: str, name: str) -> None:
     request = urllib.request.Request(
-        f"{api}/proxies/{urllib.parse.quote(group, safe='')}",
+        f"{config.api}/proxies/{urllib.parse.quote(group, safe='')}",
         data=json.dumps({"name": name}).encode(),
         headers={"Content-Type": "application/json"},
         method="PUT",
     )
     try:
-        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_S):
+        with config.direct_opener.open(request, timeout=REQUEST_TIMEOUT_S):
             pass
     except OSError as exc:
         raise RuntimeError(f"controller PUT group {group!r} failed: {exc}")
@@ -151,10 +198,10 @@ def pick_next(members: list[str], current: str) -> str:
 
 def rotate_group(config: BotConfig) -> tuple[str, str]:
     """Move the group to the next node; return (old, new). Fail loud."""
-    members, current = group_state(config.api, config.group)
+    members, current = group_state(config, config.group)
     target = pick_next(members, current)
-    select_node(config.api, config.group, target)
-    _, selected = group_state(config.api, config.group)
+    select_node(config, config.group, target)
+    _, selected = group_state(config, config.group)
     if selected != target:
         raise RuntimeError(f"group did not select {target!r}; selected {selected!r}")
     return current, target
@@ -189,7 +236,8 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     LOG.info("bot polling for /start, group=%s", config.group)
-    LOG.info("egress https_proxy=%s", config.https_proxy)
+    LOG.info("egress via dispatcher (paid exit, no pool fallback)")
+    offset = 0
     offset = 0
     while True:
         try:
