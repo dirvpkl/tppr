@@ -207,8 +207,12 @@ def rotate_group(config: BotConfig) -> tuple[str, str]:
     return current, target
 
 
-def handle_update(config: BotConfig, update: dict) -> tuple[int, str] | None:
-    """Reply (chat_id, text) for /start, None for anything else."""
+def handle_update(config: BotConfig, update: object) -> tuple[int, str] | None:
+    """Reply (chat_id, text) for /start, None for anything else.
+
+    ``update`` is boundary data straight from Telegram; it is validated once
+    here (``object`` in, malformed values ignored) rather than trusted.
+    """
     if not isinstance(update, dict):
         return None
     message = update.get("message") or update.get("edited_message") or {}

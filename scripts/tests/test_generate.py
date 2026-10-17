@@ -290,7 +290,7 @@ lock_proxy = true
             rendered,
         )
         self.assertIn(
-            "  - name: TEST_POOL\n    type: select\n" "    use: [free-vless, extra]\n",
+            "  - name: TEST_POOL\n    type: select\n    use: [free-vless, extra]\n",
             rendered,
         )
         test_pool = rendered.index("  - name: TEST_POOL\n")
