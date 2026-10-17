@@ -15,7 +15,6 @@ import argparse
 import hmac
 import json
 import logging
-import logging.handlers
 import os
 import re
 import sqlite3
@@ -30,6 +29,13 @@ from typing import cast
 from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import urlopen
+
+from common.logutil import (
+    bound_correlation_id,
+    configure_logging,
+    redact_account,
+    redact_path,
+)
 
 sys.path.insert(0, "/scripts")
 
@@ -324,6 +330,7 @@ def handle_create_account(
     if username is not None:
         created["username"] = username
         created["password"] = password
+    LOG.info("account created name=%s", redact_account(name))
     return 201, created
 
 
@@ -350,6 +357,7 @@ def handle_delete_account(state: AppState, name: str) -> tuple[int, dict[str, ob
             )
         except ValueError as exc:
             return _error(_status_code(exc), str(exc))
+        LOG.info("account deleted name=%s", redact_account(name))
     return 200, {"deleted": name, "reload_required": True}
 
 
@@ -410,6 +418,7 @@ def handle_delete_lease(
         return _error(500, f"cannot delete lease: {exc}")
     if not removed:
         return _error(404, f"unknown lease: {pool}/{user}")
+    LOG.info("lease revoked pool=%s user=%s", pool, redact_account(user))
     return 200, {"revoked": True, "pool": pool, "user": user}
 
 
@@ -452,56 +461,67 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _route(self) -> None:
         state = self.server.state  # type: ignore[attr-defined]
-        if not self._authorized():
-            self._respond(401, {"error": "missing or invalid bearer token"})
-            return
-        parts = urlsplit(self.path)
-        segments = [segment for segment in parts.path.split("/") if segment]
-        query: dict[str, str] = {}
-        for chunk in parts.query.split("&"):
-            if "=" in chunk:
-                key, _, value = chunk.partition("=")
-                query[key] = value
-        method = self.command
-        try:
-            if method == "GET" and not segments:
-                self._respond(
-                    200,
-                    {
-                        "ok": True,
-                        "endpoints": [
-                            "GET /status",
-                            "GET /accounts",
-                            "POST /accounts",
-                            "DELETE /accounts/{name}",
-                            "GET /leases[?pool=]",
-                            "DELETE /leases/{pool}/{user}",
-                        ],
-                    },
-                )
-            elif method == "GET" and segments == ["status"]:
-                self._respond(*handle_status(state, {}))
-            elif method == "GET" and segments == ["accounts"]:
-                self._respond(*handle_list_accounts(state, {}))
-            elif method == "POST" and segments == ["accounts"]:
-                payload, error = self._read_json()
-                if error is not None:
-                    self._respond(400, {"error": error})
+        with bound_correlation_id():
+            if not self._authorized():
+                self._respond(401, {"error": "missing or invalid bearer token"})
+                return
+            parts = urlsplit(self.path)
+            segments = [segment for segment in parts.path.split("/") if segment]
+            query: dict[str, str] = {}
+            for chunk in parts.query.split("&"):
+                if "=" in chunk:
+                    key, _, value = chunk.partition("=")
+                    query[key] = value
+            method = self.command
+            LOG.debug("request %s %s", method, redact_path(parts.path))
+            try:
+                if method == "GET" and not segments:
+                    self._respond(
+                        200,
+                        {
+                            "ok": True,
+                            "endpoints": [
+                                "GET /status",
+                                "GET /accounts",
+                                "POST /accounts",
+                                "DELETE /accounts/{name}",
+                                "GET /leases[?pool=]",
+                                "DELETE /leases/{pool}/{user}",
+                            ],
+                        },
+                    )
+                elif method == "GET" and segments == ["status"]:
+                    self._respond(*handle_status(state, {}))
+                elif method == "GET" and segments == ["accounts"]:
+                    self._respond(*handle_list_accounts(state, {}))
+                elif method == "POST" and segments == ["accounts"]:
+                    payload, error = self._read_json()
+                    if error is not None:
+                        self._respond(400, {"error": error})
+                    else:
+                        self._respond(*handle_create_account(state, payload or {}))
+                elif (
+                    method == "DELETE"
+                    and len(segments) == 2
+                    and segments[0] == "accounts"
+                ):
+                    self._respond(*handle_delete_account(state, segments[1]))
+                elif method == "GET" and segments == ["leases"]:
+                    self._respond(*handle_list_leases(state, query))
+                elif (
+                    method == "DELETE"
+                    and len(segments) == 3
+                    and segments[0] == "leases"
+                ):
+                    self._respond(*handle_delete_lease(state, segments[1], segments[2]))
                 else:
-                    self._respond(*handle_create_account(state, payload or {}))
-            elif (
-                method == "DELETE" and len(segments) == 2 and segments[0] == "accounts"
-            ):
-                self._respond(*handle_delete_account(state, segments[1]))
-            elif method == "GET" and segments == ["leases"]:
-                self._respond(*handle_list_leases(state, query))
-            elif method == "DELETE" and len(segments) == 3 and segments[0] == "leases":
-                self._respond(*handle_delete_lease(state, segments[1], segments[2]))
-            else:
-                self._respond(404, {"error": "unknown endpoint"})
-        except OSError as exc:
-            LOG.error("request failed: %s", exc)
-            self._respond(500, {"error": "internal error"})
+                    LOG.info("no route %s %s", method, redact_path(parts.path))
+                    self._respond(404, {"error": "unknown endpoint"})
+            except OSError as exc:
+                LOG.error(
+                    "request failed %s %s: %s", method, redact_path(parts.path), exc
+                )
+                self._respond(500, {"error": "internal error"})
 
     def do_GET(self) -> None:
         self._route()
@@ -517,21 +537,7 @@ class ApiHandler(BaseHTTPRequestHandler):
 
 
 def run(config: AppConfig) -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s level=%(levelname)s service=%(name)s %(message)s",
-    )
-    log_file = os.environ.get("LOG_FILE", "").strip()
-    if log_file:
-        file_handler = logging.handlers.RotatingFileHandler(
-            log_file, maxBytes=10_485_760, backupCount=5
-        )
-        file_handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s level=%(levelname)s service=%(name)s %(message)s"
-            )
-        )
-        logging.getLogger().addHandler(file_handler)
+    configure_logging(SERVICE_NAME)
     state = AppState(lock=threading.Lock(), config=config)
     server = ThreadingHTTPServer((config.listen, config.port), ApiHandler)
     server.daemon_threads = True

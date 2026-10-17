@@ -6,5 +6,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY hash-gate/gate.py ./gate.py
 COPY common/__init__.py ./common/__init__.py
 COPY common/upstream.py ./common/upstream.py
+COPY common/logutil.py ./common/logutil.py
 
 CMD ["python", "gate.py"]

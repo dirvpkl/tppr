@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import logging
-import logging.handlers
 import os
 import sys
 import time
@@ -24,12 +23,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from common.logutil import bound_correlation_id, configure_logging
+
 SERVICE_NAME = "tppr-tg-bot"
 POLL_TIMEOUT_S = 25
 REQUEST_TIMEOUT_S = 40
 RETRY_WAIT_S = 5
 MAX_REPLY_CHARS = 4000
-LOG_FORMAT = "%(asctime)s level=%(levelname)s service=%(name)s %(message)s"
 
 LOG = logging.getLogger(SERVICE_NAME)
 
@@ -99,17 +99,6 @@ def _dispatcher_proxy_url(services_file: str, api: str, username: str) -> str:
             )
             return f"http://{quoted}@{host}:{port}"
     raise ValueError("dispatcher account not found in services file")
-
-
-def _setup_logging() -> None:
-    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
-    log_file = os.environ.get("LOG_FILE", "").strip()
-    if log_file:
-        file_handler = logging.handlers.RotatingFileHandler(
-            log_file, maxBytes=10_485_760, backupCount=5
-        )
-        file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
-        logging.getLogger().addHandler(file_handler)
 
 
 def _telegram(config: BotConfig, method: str, payload: dict | None = None) -> dict:
@@ -233,7 +222,7 @@ def handle_update(config: BotConfig, update: object) -> tuple[int, str] | None:
 
 
 def main() -> int:
-    _setup_logging()
+    configure_logging(SERVICE_NAME)
     try:
         config = BotConfig()
     except ValueError as exc:
@@ -241,7 +230,6 @@ def main() -> int:
         return 1
     LOG.info("bot polling for /start, group=%s", config.group)
     LOG.info("egress via dispatcher (paid exit, no pool fallback)")
-    offset = 0
     offset = 0
     while True:
         try:
@@ -253,18 +241,19 @@ def main() -> int:
         for update in updates:
             if isinstance(update, dict) and isinstance(update.get("update_id"), int):
                 offset = max(offset, update["update_id"] + 1)
-            try:
-                reply = handle_update(config, update)
-            except (RuntimeError, ValueError, OSError) as exc:
-                LOG.warning("update failed: %s", exc)
-                continue
-            if reply is None:
-                continue
-            chat_id, text = reply
-            try:
-                send_message(config, chat_id, text)
-            except (RuntimeError, OSError) as exc:
-                LOG.warning("send failed: %s", exc)
+            with bound_correlation_id():
+                try:
+                    reply = handle_update(config, update)
+                except (RuntimeError, ValueError, OSError) as exc:
+                    LOG.warning("update failed: %s", exc)
+                    continue
+                if reply is None:
+                    continue
+                chat_id, text = reply
+                try:
+                    send_message(config, chat_id, text)
+                except (RuntimeError, OSError) as exc:
+                    LOG.warning("send failed: %s", exc)
         if not updates:
             continue
     return 0

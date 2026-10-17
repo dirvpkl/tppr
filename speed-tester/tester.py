@@ -10,8 +10,6 @@ candidates are found; only those candidates receive throughput tests.
 import concurrent.futures
 import http.client
 import json
-import logging
-import logging.handlers
 import os
 import random
 import sys
@@ -23,6 +21,8 @@ import uuid
 from dataclasses import dataclass
 
 from history import History
+
+from common.logutil import bound_correlation_id, configure_logging
 
 SERVICE_NAME = "tppr-speed-tester"
 SKIP_NODES = frozenset({"DIRECT", "REJECT", "PASS", "COMPATIBLE"})
@@ -132,28 +132,7 @@ def _required_int(name: str, minimum: int) -> int:
     return value
 
 
-def _logger() -> logging.Logger:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(
-        logging.Formatter(
-            f"%(asctime)s level=%(levelname)s service={SERVICE_NAME} %(message)s",
-            datefmt="%Y-%m-%dT%H:%M:%S",
-        )
-    )
-    logger = logging.getLogger(SERVICE_NAME)
-    logger.handlers = [handler]
-    logger.setLevel(logging.INFO)
-    log_file = os.environ.get("LOG_FILE", "").strip()
-    if log_file:
-        file_handler = logging.handlers.RotatingFileHandler(
-            log_file, maxBytes=10_485_760, backupCount=5
-        )
-        file_handler.setFormatter(handler.formatter)
-        logger.addHandler(file_handler)
-    return logger
-
-
-LOG = _logger()
+LOG = configure_logging(SERVICE_NAME)
 
 
 def _api_opener() -> urllib.request.OpenerDirector:
@@ -533,13 +512,15 @@ def main() -> int:
     next_test = time.monotonic()
     while True:
         try:
-            ensure_healthy(config, history)
+            with bound_correlation_id():
+                ensure_healthy(config, history)
         except RuntimeError as exc:
             LOG.error(f"event=health_error error={exc}")
         now = time.monotonic()
         if now >= next_test:
             try:
-                sweep(config, history)
+                with bound_correlation_id():
+                    sweep(config, history)
             except RuntimeError as exc:
                 LOG.error(f"event=sweep_error error={exc}")
             next_test = time.monotonic() + config.test_interval_s

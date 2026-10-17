@@ -6,10 +6,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import tester
 from history import History
+
+from common import logutil
 
 
 class ConfigTests(unittest.TestCase):
@@ -364,35 +367,44 @@ class CandidateScanTests(unittest.TestCase):
 
 
 class LoggerTests(unittest.TestCase):
+    def _restore(self, previous: list[logging.Handler]) -> None:
+        for handler in list(logging.getLogger().handlers):
+            logging.getLogger().removeHandler(handler)
+            handler.close()
+        for handler in previous:
+            logging.getLogger().addHandler(handler)
+
     def test_log_file_adds_rotating_handler(self) -> None:
+        previous = list(logging.getLogger().handlers)
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "tester.log")
             with patch.dict("os.environ", {"LOG_FILE": path}):
-                logger = tester._logger()
+                logger = logutil.configure_logging("tppr-speed-tester")
             try:
+                root = logging.getLogger()
                 file_handlers = [
                     handler
-                    for handler in logger.handlers
+                    for handler in root.handlers
                     if isinstance(handler, logging.handlers.RotatingFileHandler)
                 ]
                 self.assertEqual(1, len(file_handlers))
                 logger.info("hello")
-                for handler in logger.handlers:
+                for handler in root.handlers:
                     handler.flush()
                 self.assertIn("hello", Path(path).read_text(encoding="utf-8"))
             finally:
-                for handler in logger.handlers:
-                    handler.close()
-                logger.handlers = []
+                self._restore(previous)
 
     def test_no_log_file_keeps_stdout_only(self) -> None:
+        previous = list(logging.getLogger().handlers)
         with patch.dict("os.environ", {}, clear=True):
-            logger = tester._logger()
+            logutil.configure_logging("tppr-speed-tester")
         try:
-            self.assertEqual(1, len(logger.handlers))
-            self.assertIsInstance(logger.handlers[0], logging.StreamHandler)
+            root = logging.getLogger()
+            self.assertEqual(1, len(root.handlers))
+            self.assertIsInstance(root.handlers[0], logging.StreamHandler)
         finally:
-            logger.handlers = []
+            self._restore(previous)
 
 
 if __name__ == "__main__":

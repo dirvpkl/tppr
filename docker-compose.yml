@@ -106,7 +106,9 @@ services:
       start_period: 15s
 
   tppr-speed-tester:
-    build: ./speed-tester
+    build:
+      context: .
+      dockerfile: ./speed-tester/Dockerfile
     container_name: tppr-speed-tester
     restart: unless-stopped
     logging: *tppr-logging
@@ -142,7 +144,9 @@ services:
       - ./logs:/var/log/tppr
 
   tppr-post-prober:
-    build: ./post-prober
+    build:
+      context: .
+      dockerfile: ./post-prober/Dockerfile
     container_name: tppr-post-prober
     restart: unless-stopped
     logging: *tppr-logging
@@ -176,7 +180,9 @@ services:
       start_period: 30s
 
   tppr-api:
-    build: ./api
+    build:
+      context: .
+      dockerfile: ./api/Dockerfile
     container_name: tppr-api
     restart: unless-stopped
     logging: *tppr-logging
@@ -209,7 +215,9 @@ services:
       start_period: 15s
 
   tppr-tg-bot:
-    build: ./tg-bot
+    build:
+      context: .
+      dockerfile: ./tg-bot/Dockerfile
     container_name: tppr-tg-bot
     restart: unless-stopped
     # Opt-in profile: the bot stays down until a token exists. Never in the

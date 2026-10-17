@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import logging
-import logging.handlers
 import os
 import time
 import tomllib
@@ -32,6 +31,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from common.logutil import bound_correlation_id, configure_logging
 
 SERVICE_NAME = "tppr-post-prober"
 SKIP_NODES = frozenset({"DIRECT", "REJECT", "PASS", "COMPATIBLE"})
@@ -394,18 +395,7 @@ def _touch_heartbeat() -> None:
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
-    )
-    log_file = os.environ.get("LOG_FILE", "").strip()
-    if log_file:
-        file_handler = logging.handlers.RotatingFileHandler(
-            log_file, maxBytes=10_485_760, backupCount=5
-        )
-        file_handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-        )
-        logging.getLogger().addHandler(file_handler)
+    configure_logging(SERVICE_NAME)
     config = load_config()
     controller = Controller(config.api)
     for _ in range(STARTUP_ATTEMPTS):
@@ -433,19 +423,20 @@ def main() -> int:
     failures = 0
     cursor = 0
     while True:
-        try:
-            cursor = run_round(config, controller, opener, cursor)
-            failures = 0
-        except (OSError, ValueError) as exc:
-            failures += 1
-            log.warning(
-                "controller round failed (%s/%s): %s",
-                failures,
-                MAX_CONTROLLER_FAILURES,
-                exc,
-            )
-            if failures >= MAX_CONTROLLER_FAILURES:
-                raise
+        with bound_correlation_id():
+            try:
+                cursor = run_round(config, controller, opener, cursor)
+                failures = 0
+            except (OSError, ValueError) as exc:
+                failures += 1
+                log.warning(
+                    "controller round failed (%s/%s): %s",
+                    failures,
+                    MAX_CONTROLLER_FAILURES,
+                    exc,
+                )
+                if failures >= MAX_CONTROLLER_FAILURES:
+                    raise
         _touch_heartbeat()
         time.sleep(config.interval_s)
     return 0

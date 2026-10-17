@@ -38,6 +38,12 @@ from typing import cast
 
 import yaml  # type: ignore[import-untyped]
 
+from common.logutil import (
+    bound_correlation_id,
+    configure_logging,
+    node_token,
+    redact_account,
+)
 from common.upstream import connect_upstream, read_exact, read_http_head
 
 SERVICE_NAME = "tppr-hash-gate"
@@ -190,13 +196,15 @@ def _connect_pool(
     """
     last_error: OSError | None = None
     for node in random.sample(nodes, min(len(nodes), UPSTREAM_ATTEMPTS)):
+        token = node_token(node.get("type"), node.get("server"), node.get("port"))
         try:
-            return connect_upstream(node, host, port, CONNECT_TIMEOUT_S)
+            upstream = connect_upstream(node, host, port, CONNECT_TIMEOUT_S)
         except OSError as exc:
             last_error = exc
-            LOG.debug(
-                "upstream failed pool=%s node=%s: %s", pool, node.get("name"), exc
-            )
+            LOG.info("upstream failed pool=%s node=%s: %s", pool, token, exc)
+        else:
+            LOG.debug("upstream chosen pool=%s node=%s", pool, token)
+            return upstream
     raise OSError(f"all upstream attempts failed in pool {pool}") from last_error
 
 
@@ -256,33 +264,35 @@ class HashGateHandler(socketserver.BaseRequestHandler):
         spec = cast(PoolSpec, self.server.spec)  # type: ignore[attr-defined]
         client = cast(socket.socket, self.request)
         client.settimeout(CONNECT_TIMEOUT_S)
-        try:
-            first = client.recv(1, socket.MSG_PEEK)
-        except OSError:
-            return
-        if first == b"\x05":
-            self._handle_socks5(client, state, spec)
-        else:
-            self._handle_http(client, state, spec)
+        with bound_correlation_id():
+            try:
+                first = client.recv(1, socket.MSG_PEEK)
+            except OSError:
+                return
+            protocol = "socks5" if first == b"\x05" else "http"
+            LOG.debug("connection pool=%s proto=%s", spec.name, protocol)
+            if first == b"\x05":
+                self._handle_socks5(client, state, spec)
+            else:
+                self._handle_http(client, state, spec)
 
     def _authorize(
         self, state: GateState, spec: PoolSpec, user: str, password: str
     ) -> list[YamlMapping] | None:
+        label = redact_account(user)
         if not _check_user(user):
+            LOG.info("rejected pool=%s user=%s: malformed username", spec.name, label)
             return None
         ttl = _check_ttl(password)
         if ttl is None:
+            LOG.info("rejected pool=%s user=%s: bad TTL password", spec.name, label)
             return None
         nodes = _pool_nodes(state, spec)
         if not nodes:
             LOG.warning("pool %s has no forwardable nodes", spec.name)
             return None
         if not _lease_ok(state, spec.name, user, ttl):
-            LOG.info(
-                "expired credential pool=%s user=%s...",
-                spec.name,
-                user[:8],
-            )
+            LOG.info("expired credential pool=%s user=%s", spec.name, label)
             return None
         return nodes
 
@@ -419,10 +429,7 @@ def run(
     specs: list[PoolSpec],
     db_path: Path,
 ) -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s level=%(levelname)s service=%(name)s %(message)s",
-    )
+    configure_logging(SERVICE_NAME)
     state = GateState(
         lock=threading.Lock(),
         db=_open_db(db_path),

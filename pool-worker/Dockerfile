@@ -7,5 +7,6 @@ COPY pool-worker/worker.py ./worker.py
 COPY common/__init__.py ./common/__init__.py
 COPY common/probe.py ./common/probe.py
 COPY common/upstream.py ./common/upstream.py
+COPY common/logutil.py ./common/logutil.py
 
 CMD ["python", "worker.py", "--config", "/config/pool-sources.toml"]

@@ -24,6 +24,7 @@ from urllib.request import Request, urlopen
 import yaml  # type: ignore[import-untyped]
 
 from common import probe
+from common.logutil import bound_correlation_id, configure_logging
 
 SERVICE_NAME = "tppr-pool-worker"
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}\Z")
@@ -724,14 +725,16 @@ def _serve(config: WorkerConfig, state: WorkerState) -> ThreadingHTTPServer:
 def run(config: WorkerConfig, once: bool) -> int:
     state = WorkerState(lock=threading.Lock())
     if once:
-        refresh(config, state)
+        with bound_correlation_id():
+            refresh(config, state)
         return 0
     server = _serve(config, state)
     LOG.info("worker listening on %s:%d", config.listen, config.port)
     try:
         while True:
             try:
-                refresh(config, state)
+                with bound_correlation_id():
+                    refresh(config, state)
                 delay = config.refresh_interval_s
             except Exception as exc:
                 LOG.error("refresh failed: %s", exc)
@@ -749,10 +752,7 @@ def main() -> int:
     )
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s level=%(levelname)s service=%(name)s %(message)s",
-    )
+    configure_logging(SERVICE_NAME)
     try:
         config = _load_config(args.config)
         return run(config, args.once)
