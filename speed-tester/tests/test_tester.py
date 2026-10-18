@@ -407,5 +407,51 @@ class LoggerTests(unittest.TestCase):
             self._restore(previous)
 
 
+class CorrelationOnErrorTests(unittest.TestCase):
+    """The health/sweep catch-all must log inside bound_correlation_id, so the
+    error line carries a correlation id instead of the '-' placeholder."""
+
+    def test_health_error_logs_with_correlation_id(self) -> None:
+        records: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        class _StopLoop(Exception):
+            pass
+
+        root = logging.getLogger()
+        capture = _Capture()
+        capture.addFilter(logutil._CorrelationFilter())
+        previous_level = root.level
+        root.addHandler(capture)
+        root.setLevel(logging.INFO)
+        try:
+            config = MagicMock()
+            config.group = "TEST_POOL"
+            config.production_group = "POOL"
+            config.test_interval_s = 300
+            config.health_interval_s = 10
+            with (
+                patch.object(tester, "TesterConfig", return_value=config),
+                patch.object(tester, "History"),
+                patch.object(tester, "prepare_production"),
+                patch.object(
+                    tester, "ensure_healthy", side_effect=RuntimeError("boom")
+                ),
+                patch.object(tester, "sweep"),
+                patch.object(tester.time, "sleep", side_effect=_StopLoop),
+            ):
+                with self.assertRaises(_StopLoop):
+                    tester.main()
+        finally:
+            root.removeHandler(capture)
+            root.setLevel(previous_level)
+        errors = [r for r in records if "health_error" in r.getMessage()]
+        self.assertTrue(errors, "health_error was not logged")
+        self.assertNotEqual(errors[0].__dict__.get("rid"), "-")
+
+
 if __name__ == "__main__":
     unittest.main()

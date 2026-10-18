@@ -511,18 +511,18 @@ def main() -> int:
         return 1
     next_test = time.monotonic()
     while True:
-        try:
-            with bound_correlation_id():
+        with bound_correlation_id():
+            try:
                 ensure_healthy(config, history)
-        except RuntimeError as exc:
-            LOG.error(f"event=health_error error={exc}")
+            except RuntimeError as exc:
+                LOG.error(f"event=health_error error={exc}")
         now = time.monotonic()
         if now >= next_test:
-            try:
-                with bound_correlation_id():
+            with bound_correlation_id():
+                try:
                     sweep(config, history)
-            except RuntimeError as exc:
-                LOG.error(f"event=sweep_error error={exc}")
+                except RuntimeError as exc:
+                    LOG.error(f"event=sweep_error error={exc}")
             next_test = time.monotonic() + config.test_interval_s
         time.sleep(config.health_interval_s)
 

@@ -732,13 +732,14 @@ def run(config: WorkerConfig, once: bool) -> int:
     LOG.info("worker listening on %s:%d", config.listen, config.port)
     try:
         while True:
-            try:
-                with bound_correlation_id():
+            with bound_correlation_id():
+                try:
                     refresh(config, state)
-                delay = config.refresh_interval_s
-            except Exception as exc:
-                LOG.error("refresh failed: %s", exc)
-                delay = max(config.retry_backoff_s * config.max_attempts, 30)
+                except Exception as exc:
+                    LOG.error("refresh failed: %s", exc)
+                    delay = max(config.retry_backoff_s * config.max_attempts, 30)
+                else:
+                    delay = config.refresh_interval_s
             time.sleep(delay)
     finally:
         server.shutdown()

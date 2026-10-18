@@ -1,4 +1,5 @@
 import dataclasses
+import logging
 import socket
 import sys
 import tempfile
@@ -6,13 +7,15 @@ import threading
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import worker
 
-from common import probe
+from common import logutil, probe
 
 
 def _read_head(conn: socket.socket) -> bytes:
@@ -542,6 +545,48 @@ class WorkerTests(unittest.TestCase):
             self.assertFalse(state.ready)
         finally:
             worker._fetch_all = original
+
+
+class CorrelationOnErrorTests(unittest.TestCase):
+    """The refresh catch-all must log inside bound_correlation_id, so the error
+    line carries a correlation id instead of the '-' placeholder."""
+
+    def test_refresh_failure_logs_with_correlation_id(self) -> None:
+        records: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        class _StopLoop(Exception):
+            pass
+
+        root = logging.getLogger()
+        capture = _Capture()
+        capture.addFilter(logutil._CorrelationFilter())
+        previous_level = root.level
+        root.addHandler(capture)
+        root.setLevel(logging.INFO)
+        try:
+            config = MagicMock()
+            config.listen = "0.0.0.0"
+            config.port = 8080
+            config.refresh_interval_s = 300
+            config.retry_backoff_s = 1
+            config.max_attempts = 1
+            with (
+                patch.object(worker, "_serve"),
+                patch.object(worker, "refresh", side_effect=RuntimeError("boom")),
+                patch.object(worker.time, "sleep", side_effect=_StopLoop),
+            ):
+                with self.assertRaises(_StopLoop):
+                    worker.run(cast(worker.WorkerConfig, config), once=False)
+        finally:
+            root.removeHandler(capture)
+            root.setLevel(previous_level)
+        errors = [r for r in records if "refresh failed" in r.getMessage()]
+        self.assertTrue(errors, "refresh failed was not logged")
+        self.assertNotEqual(errors[0].__dict__.get("rid"), "-")
 
 
 if __name__ == "__main__":
