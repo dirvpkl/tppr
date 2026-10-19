@@ -146,6 +146,11 @@ headers and expected status, and run `./scripts/reload.ps1`. The prober refuses
 to start if `target.group` / `target.provider` do not belong to that account, so
 a typo there is a startup error, not a silently idle group.
 
+The prober skips nodes that already failed today: verdicts live on the
+`post-prober-data` volume and reset at 00:00 UTC. `[filter]
+exclude_countries` drops candidates by the flag in their name (for example
+`["RU", "CN"]`); if that removes every node, the prober refuses to start.
+
 Check what it settled on:
 
 ```powershell

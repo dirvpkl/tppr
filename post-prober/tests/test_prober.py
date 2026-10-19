@@ -2,8 +2,11 @@ import os
 import sys
 import tempfile
 import unittest
+import urllib.request
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -67,6 +70,7 @@ class ConfigTestCase(unittest.TestCase):
                 "SERVICES_FILE",
                 "PROBER_FILE",
                 "HEARTBEAT_MAX_AGE_S",
+                "CACHE_FILE",
             )
         }
         os.environ.update(
@@ -76,6 +80,7 @@ class ConfigTestCase(unittest.TestCase):
                 "SERVICES_FILE": str(self.services),
                 "PROBER_FILE": str(self.prober),
                 "HEARTBEAT_MAX_AGE_S": "180",
+                "CACHE_FILE": str(self.root / "cache.json"),
             }
         )
         os.environ.update(extra)
@@ -98,6 +103,8 @@ class LoadConfigTests(ConfigTestCase):
         )
         self.assertEqual(config.api, "http://controller:9090")
         self.assertEqual(config.expected_status, 400)
+        self.assertEqual(config.exclude_countries, ())
+        self.assertEqual(config.cache_file, self.root / "cache.json")
 
     def test_dispatcher_port_follows_services_file(self) -> None:
         self.services.write_text(
@@ -145,6 +152,33 @@ class LoadConfigTests(ConfigTestCase):
         )
         with self.assertRaisesRegex(ValueError, "unknown keys: sessin"):
             prober.load_config()
+
+    def test_parses_country_denylist(self) -> None:
+        self.prober.write_text(
+            prober_text(self.body)
+            + '\n[filter]\nexclude_countries = ["ru", "CN", "ru"]\n',
+            encoding="utf-8",
+        )
+        self.assertEqual(prober.load_config().exclude_countries, ("RU", "CN"))
+
+    def test_rejects_unknown_filter_key(self) -> None:
+        self.prober.write_text(
+            prober_text(self.body) + '\n[filter]\nexclude = ["RU"]\n',
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "unknown keys: exclude"):
+            prober.load_config()
+
+    def test_rejects_invalid_country_code(self) -> None:
+        for code in ("RUS", "ß", ""):
+            with self.subTest(code=code):
+                self.prober.write_text(
+                    prober_text(self.body)
+                    + f'\n[filter]\nexclude_countries = ["{code}"]\n',
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, "invalid country code"):
+                    prober.load_config()
 
 
 class PickOrderTests(unittest.TestCase):
@@ -199,7 +233,76 @@ def config() -> prober.ProbeConfig:
         timeout_s=5,
         interval_s=15,
         heartbeat_max_age_s=180,
+        exclude_countries=(),
+        cache_file=Path("cache.json"),
     )
+
+
+class RunRoundTests(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cache = prober.VerdictCache(
+            path=Path(tmp.name) / "cache.json", day="2026-10-19"
+        )
+
+    def run_round(
+        self,
+        controller: FakeController,
+        results: list[tuple[int | None, str]],
+        *,
+        exclude_countries: tuple[str, ...] = (),
+        cursor: int = 0,
+    ) -> tuple[int, Any]:
+        probe_config = replace(config(), exclude_countries=exclude_countries)
+        with mock.patch.object(prober, "probe_once", side_effect=results) as probe:
+            cursor = prober.run_round(
+                probe_config,
+                controller,
+                urllib.request.OpenerDirector(),
+                cursor,
+                self.cache,
+            )
+        return cursor, probe
+
+    def test_skips_a_node_cached_bad(self) -> None:
+        controller = FakeController("Selector", "a", ["a", "b"])
+        self.cache.record("a", False)
+        cursor, probe = self.run_round(controller, [(400, "ok")])
+        self.assertEqual(controller.switched, ["b"])
+        self.assertEqual(probe.call_count, 1)
+        self.assertEqual(cursor, 0)
+
+    def test_country_filter_skips_denied_node(self) -> None:
+        controller = FakeController(
+            "Selector", "🇷🇺 YT & DS 4", ["🇷🇺 YT & DS 4", "🇩🇪 Германия 1"]
+        )
+        cursor, probe = self.run_round(
+            controller, [(400, "ok")], exclude_countries=("RU",)
+        )
+        self.assertEqual(controller.switched, ["🇩🇪 Германия 1"])
+        self.assertEqual(probe.call_count, 1)
+        self.assertEqual(cursor, 0)
+
+    def test_retries_every_node_when_all_are_cached_bad(self) -> None:
+        controller = FakeController("Selector", "a", ["a", "b"])
+        self.cache.record("a", False)
+        self.cache.record("b", False)
+        cursor, probe = self.run_round(controller, [(500, "bad"), (400, "ok")])
+        self.assertEqual(controller.switched, ["b"])
+        self.assertEqual(probe.call_count, 2)
+        self.assertTrue(self.cache.is_bad("a"))
+        self.assertFalse(self.cache.is_bad("b"))
+        self.assertEqual(cursor, 1)
+
+    def test_nothing_to_probe_when_filter_removes_every_node(self) -> None:
+        controller = FakeController("Selector", "🇷🇺 a", ["🇷🇺 a"])
+        cursor, probe = self.run_round(
+            controller, [(400, "ok")], exclude_countries=("RU",)
+        )
+        self.assertEqual(controller.switched, [])
+        self.assertEqual(probe.call_count, 0)
+        self.assertEqual(cursor, 0)
 
 
 class GroupTypeTests(unittest.TestCase):

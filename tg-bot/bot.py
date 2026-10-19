@@ -1,10 +1,12 @@
 """Primitive Telegram bot: /start rotates one Mihomo select group.
 
 Long-polls the Bot API for updates. A /start message moves TARGET_GROUP to
-the next member (round-robin over the controller's order) and replies with
-old -> new node names, or with the error text when rotation fails. Anything
-that is not /start is ignored. No ports are published: the bot only makes
-outbound HTTPS calls (Telegram API, Mihomo controller).
+the next eligible member (round-robin over the controller's order) and replies
+with old -> new node names, or with the error text when rotation fails.
+Eligible means country-allowed per the prober's ``[filter]`` and not cached bad
+for the current UTC day, so a manual rotation cannot undo the prober's work.
+Anything that is not /start is ignored. No ports are published: the bot only
+makes outbound HTTPS calls (Telegram API, Mihomo controller).
 
 Secrets: TELEGRAM_BOT_TOKEN comes from the environment; the dispatcher
 account password comes from the mounted services.toml. Neither is ever
@@ -22,8 +24,14 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 from common.logutil import bound_correlation_id, configure_logging
+from common.prober_state import (
+    VerdictCache,
+    eligible_candidates,
+    load_excluded_countries,
+)
 
 SERVICE_NAME = "tppr-tg-bot"
 POLL_TIMEOUT_S = 25
@@ -50,6 +58,10 @@ class BotConfig:
         self.group = _getenv("TARGET_GROUP")
         self.services_file = _getenv("BOT_SERVICES_FILE")
         self.username = _getenv("BOT_USERNAME")
+        self.prober_file = _getenv("BOT_PROBER_FILE")
+        self.cache_file = Path(_getenv("BOT_CACHE_FILE"))
+        # Same sources as the prober: one denylist, one verdict cache.
+        self.excluded_countries = load_excluded_countries(Path(self.prober_file))
         proxy_url = _dispatcher_proxy_url(self.services_file, self.api, self.username)
         # Explicit openers: Telegram leaves only through the dispatcher
         # (paid exit); the controller stays direct. No environment routing,
@@ -185,10 +197,35 @@ def pick_next(members: list[str], current: str) -> str:
     return members[(index + 1) % len(members)]
 
 
+def rotation_members(config: BotConfig, members: list[str]) -> list[str]:
+    """Members a /start may rotate to.
+
+    The prober's denylist and today's verdict cache apply here too: a manual
+    rotation must not land on a denied country or on a node the prober already
+    found broken. The cache is reloaded per rotation because the prober writes
+    it every round.
+    """
+    cache = VerdictCache.load(config.cache_file)
+    selection = eligible_candidates(members, config.excluded_countries, cache)
+    if not selection.to_probe:
+        raise ValueError(f"country filter excludes every member of {config.group}")
+    if selection.all_bad_retry:
+        LOG.warning(
+            "all %d rotatable members are cached bad, retrying them",
+            len(selection.to_probe),
+        )
+    elif selection.skipped_bad:
+        LOG.info(
+            "rotation skipped %d cached-bad members",
+            selection.skipped_bad,
+        )
+    return list(selection.to_probe)
+
+
 def rotate_group(config: BotConfig) -> tuple[str, str]:
-    """Move the group to the next node; return (old, new). Fail loud."""
+    """Move the group to the next eligible node; return (old, new). Fail loud."""
     members, current = group_state(config, config.group)
-    target = pick_next(members, current)
+    target = pick_next(rotation_members(config, members), current)
     select_node(config, config.group, target)
     _, selected = group_state(config, config.group)
     if selected != target:
@@ -229,6 +266,11 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     LOG.info("bot polling for /start, group=%s", config.group)
+    LOG.info(
+        "rotation honours prober filter %s and verdict cache %s",
+        ", ".join(config.excluded_countries) or "none",
+        config.cache_file,
+    )
     LOG.info("egress via dispatcher (paid exit, no pool fallback)")
     offset = 0
     while True:

@@ -159,6 +159,8 @@ services:
       # services.toml, the single source for both.
       SERVICES_FILE: /config/services.toml
       PROBER_FILE: /config/post-prober.toml
+      # Daily node verdicts: survives a recreate, rolls over at 00:00 UTC.
+      CACHE_FILE: /data/post-prober-cache.json
       HEARTBEAT_MAX_AGE_S: ${POST_PROBER_HEARTBEAT_MAX_AGE_S:-180}
       LOG_FILE: /var/log/tppr/tppr-post-prober.log
     volumes:
@@ -166,6 +168,7 @@ services:
       - ./post-prober.toml:/config/post-prober.toml:ro
       - ./post-prober-body.json:/config/post-prober-body.json:ro
       - ./logs:/var/log/tppr
+      - post-prober-data:/data
     healthcheck:
       test:
         [
@@ -237,11 +240,18 @@ services:
       # read by the bot itself — no credential duplication, nothing printed).
       BOT_SERVICES_FILE: /config/services.toml
       BOT_USERNAME: tg-bot
+      # Same denylist and verdict cache as the prober: a manual rotation does
+      # not undo its work.
+      BOT_PROBER_FILE: /config/post-prober.toml
+      BOT_CACHE_FILE: /data/post-prober-cache.json
       LOG_FILE: /var/log/tppr/tppr-tg-bot.log
     volumes:
       - ./logs:/var/log/tppr
       - ./services.toml:/config/services.toml:ro
+      - ./post-prober.toml:/config/post-prober.toml:ro
+      - post-prober-data:/data:ro
 
 volumes:
   tester-data:
   hash-gate-data:
+  post-prober-data:

@@ -45,8 +45,10 @@ it must stay on `127.0.0.1` or anyone on the LAN gets full control.
   account password from `services.toml` and rejects a target group/provider
   that does not belong to that account. Request shape comes from the gitignored
   `post-prober.toml` + `post-prober-body.json` (copy the `.example` files).
-  Heartbeat: no completed round within `POST_PROBER_HEARTBEAT_MAX_AGE_S`
-  (default 180) means unhealthy.
+  Node verdicts persist on the `post-prober-data` volume and reset at 00:00
+  UTC; `[filter] exclude_countries` drops flag-labelled candidates (a
+  denylist that removes every node aborts at startup). Heartbeat: no completed
+  round within `POST_PROBER_HEARTBEAT_MAX_AGE_S` (default 180) means unhealthy.
 - `20001–20004` — fixed per-service ports (pool groups, no auth).
 - `20005` — fixed port, `round-robin` rotation over the free pool.
 - `17890` — unpublished (container still listens on `:7890`, unreachable from
@@ -166,7 +168,8 @@ pool contents — in that order.
 - `python -m unittest discover -s scripts/tests` (36: generator + accounts)
 - `python -m unittest discover -s pool-worker/tests` (14: dedupe, partition, isolation)
 - `python -m unittest discover -s hash-gate/tests` (11: validation, TTL, echo round-trip)
-- `python -m unittest discover -s post-prober/tests` (14: config wiring, group type)
+- `python -m unittest discover -s common/tests` (52: log format, shared prober country/verdict state)
+- `python -m unittest discover -s post-prober/tests` (21: config wiring, group type, run-round filtering)
 - `python -m unittest discover -s api/tests` (9: accounts CRUD, leases)
 - Lint/type order: `uvx black --check`, `uvx ruff format --check`,
   `uvx ruff check`, `uvx isort --check-only`, `uvx mypy` (per directory).
@@ -214,9 +217,12 @@ pool contents — in that order.
   package, ~98%). Reality/XTLS-vision and Hysteria2 are out of scope.
 - Telegram rotation bot: `tg-bot/` (stdlib long-poll, no aiogram), opt-in
   compose profile `tg-bot`, `/start` rotates `TARGET_GROUP` (default
-  `SVC_opencode-acc`) and replies old -> new. Needs `TELEGRAM_BOT_TOKEN` in
-  `.env` (BotFather); without it the container exits loudly. Never started
-  by the default path.
+  `SVC_opencode-acc`) to the next eligible node and replies old -> new. It
+  reads the same `[filter]` and verdict cache as the prober (`BOT_PROBER_FILE`,
+  `BOT_CACHE_FILE`), so a manual rotation cannot land on a denied country or
+  a cached-bad node. Needs `TELEGRAM_BOT_TOKEN` in `.env` (BotFather) and the
+  gitignored prober files; without the token the container exits loudly.
+  Never started by the default path.
 - Scale-out idea (not built): one gateway port instead of N, pool chosen by
   username prefix (`free:<name>`, `batch2:<name>`). Separate paid batches
   become pool files, not new ports.

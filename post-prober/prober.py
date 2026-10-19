@@ -33,6 +33,12 @@ from pathlib import Path
 from typing import Any
 
 from common.logutil import bound_correlation_id, configure_logging
+from common.prober_state import (
+    VerdictCache,
+    eligible_candidates,
+    filter_candidates,
+    parse_country_codes,
+)
 
 SERVICE_NAME = "tppr-post-prober"
 SKIP_NODES = frozenset({"DIRECT", "REJECT", "PASS", "COMPATIBLE"})
@@ -66,6 +72,8 @@ class ProbeConfig:
     timeout_s: int
     interval_s: int
     heartbeat_max_age_s: int
+    exclude_countries: tuple[str, ...]
+    cache_file: Path
 
 
 def _required_env(name: str) -> str:
@@ -237,6 +245,15 @@ def load_config() -> ProbeConfig:
     if not body:
         raise ValueError(f"probe body {body_file} is empty")
 
+    filter_table = _table(
+        prober_doc.get("filter", {}),
+        "filter",
+        frozenset({"exclude_countries"}),
+    )
+    exclude_countries = parse_country_codes(
+        filter_table.get("exclude_countries", []), "filter.exclude_countries"
+    )
+
     quoted = urllib.parse.quote(service.password, safe="")
     return ProbeConfig(
         api=api,
@@ -253,6 +270,8 @@ def load_config() -> ProbeConfig:
         heartbeat_max_age_s=_required_int_env(
             "HEARTBEAT_MAX_AGE_S", interval + 1, 86400
         ),
+        exclude_countries=exclude_countries,
+        cache_file=Path(_required_env("CACHE_FILE")),
     )
 
 
@@ -362,12 +381,36 @@ def run_round(
     controller: Controller,
     opener: urllib.request.OpenerDirector,
     cursor: int,
+    cache: VerdictCache,
 ) -> int:
     group_all = _check_select_group(controller, config)
-    candidates = controller.candidates(config.provider, group_all)
-    if not candidates:
+    raw_candidates = controller.candidates(config.provider, group_all)
+    if not raw_candidates:
         log.warning("no candidates in provider %s yet, retrying", config.provider)
         return cursor
+    selection = eligible_candidates(raw_candidates, config.exclude_countries, cache)
+    if not selection.to_probe:
+        log.warning(
+            "country filter %s removed all %d candidates of %s, staying put",
+            ", ".join(config.exclude_countries),
+            len(raw_candidates),
+            config.provider,
+        )
+        return cursor
+    if selection.all_bad_retry:
+        log.warning(
+            "all %d candidates are cached bad for UTC day %s, retrying them",
+            len(selection.to_probe),
+            cache.day,
+        )
+    elif selection.skipped_bad:
+        log.debug(
+            "skipping %d candidates cached bad for UTC day %s",
+            selection.skipped_bad,
+            cache.day,
+        )
+
+    candidates = list(selection.to_probe)
     now = controller.group(config.group).get("now")
     order, cursor = pick_order(candidates, now if type(now) is str else None, cursor)
     for name in order:
@@ -380,8 +423,10 @@ def run_round(
                 continue
         code, detail = probe_once(config, opener)
         if code == config.expected_status:
+            cache.record(name, True)
             log.info("picked %s, probe answered %s", name, code)
             return candidates.index(name)
+        cache.record(name, False)
         log.warning("node %s answered %s (%s), rerolling", name, code, detail)
     log.warning("no candidate answered %s, staying put", config.expected_status)
     return cursor
@@ -397,11 +442,18 @@ def _touch_heartbeat() -> None:
 def main() -> int:
     configure_logging(SERVICE_NAME)
     config = load_config()
+    cache = VerdictCache.load(config.cache_file)
     controller = Controller(config.api)
     for _ in range(STARTUP_ATTEMPTS):
         try:
             group_all = _check_select_group(controller, config)
-            if controller.candidates(config.provider, group_all):
+            raw_candidates = controller.candidates(config.provider, group_all)
+            if raw_candidates:
+                if not filter_candidates(raw_candidates, config.exclude_countries):
+                    raise ValueError(
+                        f"country filter {config.exclude_countries} excludes every "
+                        f"candidate of provider {config.provider}"
+                    )
                 break
         except OSError as exc:
             log.info("controller not ready yet: %s", exc)
@@ -409,12 +461,13 @@ def main() -> int:
     else:
         raise ValueError(f"provider {config.provider} never served candidates")
     log.info(
-        "steering %s over %s, expecting %s from %s every %ss",
+        "steering %s over %s, expecting %s from %s every %ss, excluding countries: %s",
         config.group,
         config.provider,
         config.expected_status,
         config.method,
         config.interval_s,
+        ", ".join(config.exclude_countries) or "none",
     )
     proxy_handler = urllib.request.ProxyHandler(
         {"http": config.proxy_url, "https": config.proxy_url}
@@ -425,7 +478,8 @@ def main() -> int:
     while True:
         with bound_correlation_id():
             try:
-                cursor = run_round(config, controller, opener, cursor)
+                cache.rollover()
+                cursor = run_round(config, controller, opener, cursor, cache)
                 failures = 0
             except (OSError, ValueError) as exc:
                 failures += 1

@@ -4,5 +4,6 @@ WORKDIR /app
 COPY tg-bot/bot.py ./bot.py
 COPY common/__init__.py ./common/__init__.py
 COPY common/logutil.py ./common/logutil.py
+COPY common/prober_state.py ./common/prober_state.py
 
 CMD ["python", "bot.py"]

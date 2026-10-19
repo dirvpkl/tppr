@@ -1,4 +1,4 @@
-# tppr 0.13.0 — a global pool, LAN-reachable proxy ports, an optional dispatcher, pinned accounts, local pool aggregation, and custom probe checks.
+# tppr 0.14.0 — a global pool, LAN-reachable proxy ports, an optional dispatcher, pinned accounts, local pool aggregation, and custom probe checks.
 
 > Vibe-coded side project, built to demo a fun idea: a self-hosted proxy router.
 
@@ -59,6 +59,17 @@
     so a node that answers `403 RegionError` (wrong country) is abandoned in
     about a second. If nothing answers as expected, the group stays put and the
     next round retries from the top.
+  - The prober remembers which nodes already failed today in a JSON verdict
+    cache on the `post-prober-data` volume, so later rounds skip them instead
+    of walking the whole pool. The cache clears at 00:00 UTC. If every
+    candidate is cached bad, it retries them for one round rather than leaving
+    the group stuck for the rest of the day.
+  - `[filter] exclude_countries` drops candidates by the flag prefix in their
+    node name (`🇷🇺` → `RU`, `🇨🇳` → `CN`). Nodes without a flag are never
+    denied, and a denylist that excludes every node is a startup error.
+  - The Telegram rotation bot (opt-in `tg-bot` profile) reads the same
+    `[filter]` and the same verdict cache, so `/start` skips denied and
+    cached-bad members instead of undoing the prober's choice.
 - The prober is a separate container because its job is a steering loop, not
   node admission. It reads the dispatcher port and the account password from
   `services.toml` (one source for both) and verifies at startup that
@@ -66,7 +77,8 @@
   a typo there aborts instead of quietly steering nothing.
 - Request shape lives in the gitignored `post-prober.toml` and
   `post-prober-body.json`; copy the `.example` files to start. It carries the
-  URL, method, headers, body file, expected status and interval.
+  URL, method, headers, body file, expected status, interval, and the optional
+  `[filter] exclude_countries` denylist.
 - Each completed round touches a heartbeat file, and the container reports
   unhealthy when no round lands within `POST_PROBER_HEARTBEAT_MAX_AGE_S`
   (default 180 s, keep it above `interval_s`). "Running" and "still working"

@@ -1,6 +1,8 @@
+import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,7 +17,15 @@ def make_config() -> bot.BotConfig:
     config.token = "test-token"
     config.api = "http://mihomo:9090"
     config.group = "SVC_opencode-acc"
+    config.excluded_countries = ()
+    config.cache_file = Path("/nonexistent/post-prober-cache.json")
     return config
+
+
+def write_cache(path: Path, bad: list[str]) -> None:
+    day = datetime.now(timezone.utc).date().isoformat()
+    nodes = {name: name not in bad for name in bad}
+    path.write_text(json.dumps({"day": day, "nodes": nodes}), encoding="utf-8")
 
 
 class PickNextTests(unittest.TestCase):
@@ -104,8 +114,81 @@ class RotateGroupTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "did not select"):
                 bot.rotate_group(config)
 
+    def test_skips_denied_country(self) -> None:
+        config = make_config()
+        config.excluded_countries = ("RU",)
+        members = ["🇷🇺 YT & DS 4", "🇩🇪 Германия 1", "🇩🇪 Германия 2"]
+        with (
+            patch.object(
+                bot,
+                "group_state",
+                side_effect=[(members, "🇷🇺 YT & DS 4"), (members, "🇩🇪 Германия 1")],
+            ),
+            patch.object(bot, "select_node") as select,
+        ):
+            old, new = bot.rotate_group(config)
+        self.assertEqual((old, new), ("🇷🇺 YT & DS 4", "🇩🇪 Германия 1"))
+        select.assert_called_once_with(config, config.group, "🇩🇪 Германия 1")
+
+    def test_skips_cached_bad_member(self) -> None:
+        config = make_config()
+        with tempfile.TemporaryDirectory() as directory:
+            config.cache_file = Path(directory) / "cache.json"
+            write_cache(config.cache_file, bad=["b"])
+            with (
+                patch.object(
+                    bot,
+                    "group_state",
+                    side_effect=[(["a", "b", "c"], "a"), (["a", "b", "c"], "c")],
+                ),
+                patch.object(bot, "select_node") as select,
+            ):
+                old, new = bot.rotate_group(config)
+        self.assertEqual((old, new), ("a", "c"))
+        select.assert_called_once_with(config, config.group, "c")
+
+    def test_all_denied_fails_loudly(self) -> None:
+        config = make_config()
+        config.excluded_countries = ("RU",)
+        with (
+            patch.object(bot, "group_state", return_value=(["🇷🇺 a"], "🇷🇺 a")),
+            patch.object(bot, "select_node"),
+        ):
+            with self.assertRaisesRegex(ValueError, "country filter"):
+                bot.rotate_group(config)
+
+
+SERVICES_BODY = (
+    '[dispatcher]\nport = 17893\n\n[[services]]\nusername = "bot"\npassword = "pw"\n'
+)
+
 
 class ConfigTests(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.services = self.root / "services.toml"
+        self.services.write_text(SERVICES_BODY, encoding="utf-8")
+        self.prober = self.root / "post-prober.toml"
+        self.prober.write_text(
+            '[filter]\nexclude_countries = ["ru"]\n', encoding="utf-8"
+        )
+        self.cache = self.root / "cache.json"
+
+    def environment(self, **extra: str) -> dict[str, str]:
+        values = {
+            "TELEGRAM_BOT_TOKEN": "t",
+            "MIHOMO_API": "http://m:9090",
+            "TARGET_GROUP": "g",
+            "BOT_SERVICES_FILE": str(self.services),
+            "BOT_USERNAME": "bot",
+            "BOT_PROBER_FILE": str(self.prober),
+            "BOT_CACHE_FILE": str(self.cache),
+        }
+        values.update(extra)
+        return values
+
     def test_missing_token_fails_loudly(self) -> None:
         with (
             patch.dict("os.environ", {}, clear=True),
@@ -114,12 +197,8 @@ class ConfigTests(unittest.TestCase):
             bot.BotConfig()
 
     def test_missing_username_fails_loudly(self) -> None:
-        environment = {
-            "TELEGRAM_BOT_TOKEN": "t",
-            "MIHOMO_API": "http://m:9090",
-            "TARGET_GROUP": "g",
-            "BOT_SERVICES_FILE": "/config/services.toml",
-        }
+        environment = self.environment()
+        del environment["BOT_USERNAME"]
         with (
             patch.dict("os.environ", environment, clear=True),
             self.assertRaisesRegex(ValueError, "BOT_USERNAME"),
@@ -127,15 +206,46 @@ class ConfigTests(unittest.TestCase):
             bot.BotConfig()
 
     def test_missing_services_file_fails_loudly(self) -> None:
-        environment = {
-            "TELEGRAM_BOT_TOKEN": "t",
-            "MIHOMO_API": "http://m:9090",
-            "TARGET_GROUP": "g",
-            "BOT_USERNAME": "bot",
-        }
+        environment = self.environment()
+        del environment["BOT_SERVICES_FILE"]
         with (
             patch.dict("os.environ", environment, clear=True),
             self.assertRaisesRegex(ValueError, "BOT_SERVICES_FILE"),
+        ):
+            bot.BotConfig()
+
+    def test_missing_prober_env_fails_loudly(self) -> None:
+        environment = self.environment()
+        del environment["BOT_PROBER_FILE"]
+        with (
+            patch.dict("os.environ", environment, clear=True),
+            self.assertRaisesRegex(ValueError, "BOT_PROBER_FILE"),
+        ):
+            bot.BotConfig()
+
+    def test_reads_denylist_from_the_prober_file(self) -> None:
+        with patch.dict("os.environ", self.environment(), clear=True):
+            config = bot.BotConfig()
+        self.assertEqual(config.excluded_countries, ("RU",))
+        self.assertEqual(config.cache_file, self.cache)
+
+    def test_missing_prober_file_fails_loudly(self) -> None:
+        environment = self.environment(
+            BOT_PROBER_FILE=str(self.root / "nope" / "post-prober.toml")
+        )
+        with (
+            patch.dict("os.environ", environment, clear=True),
+            self.assertRaisesRegex(ValueError, "cannot read prober config"),
+        ):
+            bot.BotConfig()
+
+    def test_bad_filter_fails_loudly(self) -> None:
+        self.prober.write_text(
+            '[filter]\nexclude_countries = ["RUS"]\n', encoding="utf-8"
+        )
+        with (
+            patch.dict("os.environ", self.environment(), clear=True),
+            self.assertRaisesRegex(ValueError, "invalid country code"),
         ):
             bot.BotConfig()
 
